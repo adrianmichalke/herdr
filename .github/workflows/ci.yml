@@ -168,6 +168,14 @@ jobs:
           restore-keys: |
             ci-incremental-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN_VERSION }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ env.CARGO_PROFILE_TEST_DEBUG }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.cargo/config.toml', 'build.rs', 'crates/*/Cargo.toml', 'crates/*/build.rs') }}-
 
+      - name: Install Vim integration test editors
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y vim-nox neovim
+          vim --version
+          nvim --version
+
       - name: Run Linux lint
         if: runner.os == 'Linux'
         run: CARGO_INCREMENTAL=1 just lint

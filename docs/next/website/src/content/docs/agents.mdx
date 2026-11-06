@@ -59,6 +59,10 @@ An agent that also reports its resume command comes back in the same session aft
 
 If you build a coding agent, [Add Herdr support to your agent](/docs/add-herdr-support/) shows how to join this list. It takes a few calls to Herdr's CLI or socket, and no change to Herdr.
 
+## Vim and Neovim
+
+This fork also recognizes `vim` and `nvim` as `vim` in the sidebar and agent list, with an idle editor status and no agent completion sounds. Install the CLI-only `vim` integration to restore the editor's saved-file buffers and layout after a server restart. See [Vim and Neovim integrations](/docs/integrations/#vim-and-neovim) for installation and recovery limits.
+
 ## How status works
 
 For agents Herdr supports, Herdr finds the agent's process in each pane and reads the live bottom of the pane, not the part you scrolled to. Rules in a detection manifest decide whether that screen means `idle`, `working`, or `blocked`. When an integration also reports state, Herdr uses those reports instead of reading the screen.

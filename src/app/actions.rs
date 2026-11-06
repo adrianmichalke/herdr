@@ -3773,6 +3773,48 @@ mod tests {
     }
 
     #[test]
+    fn vim_resume_survives_detection_and_is_cleared_on_quit() {
+        let mut state = app_with_workspaces(&["one"]);
+        let (pane_id, terminal_id) = first_pane_terminal(&state);
+        state.handle_app_event(AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr-vim".into(),
+            agent_label: "vim".into(),
+            state: AgentState::Idle,
+            message: None,
+            seq: Some(1),
+            session_ref: None,
+        });
+        state.handle_app_event(AppEvent::AgentResumeReported {
+            pane_id,
+            source: "herdr-vim".into(),
+            agent_label: "vim".into(),
+            seq: Some(1),
+            argv: vec!["vim".into(), "-S".into(), "session.vim".into()],
+        });
+        state.handle_app_event(AppEvent::AgentProcessDetected {
+            pane_id,
+            agent: Agent::Vim,
+            observed_at: std::time::Instant::now(),
+        });
+        let terminal = &state.terminals[&terminal_id];
+        assert_eq!(terminal.effective_agent_label(), Some("vim"));
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert!(terminal.reported_resume().is_some());
+        state.session_dirty = false;
+
+        state.handle_app_event(AppEvent::HookAgentReleased {
+            pane_id,
+            source: "herdr-vim".into(),
+            agent_label: "vim".into(),
+            known_agent: Some(Agent::Vim),
+            seq: Some(2),
+        });
+        assert!(state.terminals[&terminal_id].reported_resume().is_none());
+        assert!(state.session_dirty);
+    }
+
+    #[test]
     fn shell_return_drops_self_reported_agent_and_its_resume() {
         let mut state = app_with_workspaces(&["one"]);
         let (pane_id, terminal_id) = first_pane_terminal(&state);

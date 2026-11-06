@@ -4736,7 +4736,7 @@ mod tests {
             test_entry(10, 1, "bash.exe", &[r"C:\Program Files\Git\bin\bash.exe"]),
             test_entry(11, 10, "claude.exe", &["claude.exe"]),
             test_entry(20, 99, "codex.exe", &["codex.exe"]),
-            test_entry(30, 98, "vim.exe", &["vim.exe"]),
+            test_entry(30, 98, "less.exe", &["less.exe"]),
             test_entry(50, 77, "claude.exe", &["claude.exe"]),
         ];
         let snapshot = super::ProcessSnapshot::new(entries);

@@ -65,10 +65,11 @@ pub enum Agent {
     Letta,
     Maki,
     Muse,
+    Vim,
 }
 
 impl Agent {
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 25] = [
         Self::Pi,
         Self::Claude,
         Self::Codex,
@@ -93,6 +94,7 @@ impl Agent {
         Self::Letta,
         Self::Maki,
         Self::Muse,
+        Self::Vim,
     ];
 
     pub const SCREEN_MANIFEST_AGENTS: [Self; 22] = [
@@ -147,6 +149,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Letta => "letta",
         Agent::Maki => "maki",
         Agent::Muse => "muse",
+        Agent::Vim => "vim",
     }
 }
 
@@ -182,6 +185,7 @@ pub fn interactive_agent_executable(agent: Agent) -> &'static str {
         Agent::Letta => "letta",
         Agent::Maki => "maki",
         Agent::Muse => "muse",
+        Agent::Vim => "vim",
     }
 }
 
@@ -222,6 +226,7 @@ fn lookup_agent(name: &str) -> Option<Agent> {
         "letta" | "letta-code" | "letta code" => Some(Agent::Letta),
         "maki" => Some(Agent::Maki),
         "muse" | "muse-code" | "muse-cli" => Some(Agent::Muse),
+        "vim" | "nvim" | "vim.basic" | "vim.nox" | "vim.tiny" => Some(Agent::Vim),
         _ if is_muse_versioned_binary(name) => Some(Agent::Muse),
         _ => None,
     }
@@ -1110,6 +1115,7 @@ mod tests {
             (Agent::Letta, "letta"),
             (Agent::Maki, "maki"),
             (Agent::Muse, "muse"),
+            (Agent::Vim, "vim"),
         ];
         assert_eq!(expected.len(), Agent::ALL.len());
         for (agent, executable) in expected {
@@ -1149,10 +1155,30 @@ mod tests {
     }
 
     #[test]
+    fn identify_vim_and_neovim_processes() {
+        for name in [
+            "vim",
+            "nvim",
+            "vim.basic",
+            "vim.nox",
+            "vim.tiny",
+            "/usr/bin/vim",
+            "nvim.exe",
+        ] {
+            assert_eq!(identify_agent(name), Some(Agent::Vim), "{name}");
+        }
+        assert!(!Agent::SCREEN_MANIFEST_AGENTS.contains(&Agent::Vim));
+        let detection = detect_agent(Some(Agent::Vim), "");
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(!detection.visible_working);
+        assert!(!detection.visible_blocker);
+    }
+
+    #[test]
     fn identify_unknown_processes() {
         assert_eq!(identify_agent("bash"), None);
         assert_eq!(identify_agent("zsh"), None);
-        assert_eq!(identify_agent("vim"), None);
+        assert_eq!(identify_agent("vimdiff-helper"), None);
         assert_eq!(identify_agent("node"), None);
         assert_eq!(identify_agent("museum"), None);
         assert_eq!(identify_agent("muse-helper"), None);

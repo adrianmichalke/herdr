@@ -521,6 +521,7 @@ pub(crate) fn parse_integration_version(content: &str) -> Option<u32> {
             .trim()
             .trim_start_matches('/')
             .trim_start_matches('#')
+            .trim_start_matches('"')
             .trim();
         marker_line
             .strip_prefix(super::INTEGRATION_VERSION_MARKER)?

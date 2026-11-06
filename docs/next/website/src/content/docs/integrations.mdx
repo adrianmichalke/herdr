@@ -28,6 +28,7 @@ herdr integration install cursor
 herdr integration install mastracode
 herdr integration install antigravity-cli
 herdr integration install grok
+herdr integration install vim
 ```
 
 ## Uninstall integrations
@@ -51,6 +52,7 @@ herdr integration uninstall cursor
 herdr integration uninstall mastracode
 herdr integration uninstall antigravity-cli
 herdr integration uninstall grok
+herdr integration uninstall vim
 ```
 
 Herdr saves integration configs atomically on Linux/macOS and for new files; existing Windows files keep their permissions through a backup-first, in-place update. If Windows reports a backup, close the agent and inspect the config before retrying: discard—not restore—an unfinished `.herdr-backup.pending` only after verifying the config, or restore completed `.herdr-backup` contents into the existing file if needed (if missing, establish its intended permissions first), then verify the config and remove the backup.
@@ -66,6 +68,27 @@ Native session restore requires current Herdr integrations: Pi integration versi
 ## Integrate your own agent
 
 If you build a coding agent, you can report its state and resume command to Herdr from your own code, without adding native support to Herdr. See [Add Herdr support to your agent](/docs/add-herdr-support/).
+
+## Vim and Neovim
+
+This fork recognizes Vim and Neovim processes as `vim` in the sidebar and agent list. Editors stay idle rather than interpreting file contents as agent activity, and do not play agent completion sounds. Recognition works without installing an integration.
+
+To enable session restore, run `herdr integration install vim`. This CLI-only target installs a Vimscript package for both editors without changing your vimrc or Neovim configuration:
+
+```text
+~/.vim/pack/herdr/start/herdr/plugin/herdr.vim
+~/.local/share/nvim/site/pack/herdr/start/herdr/plugin/herdr.vim
+```
+
+The Neovim path respects `XDG_DATA_HOME` and `NVIM_APPNAME`. Vim uses `$XDG_CONFIG_HOME/vim` instead of `~/.vim` when its standard XDG vimrc is present without a legacy vimrc. On Windows, Vim uses `~/vimfiles`, and Neovim uses its data directory under `LOCALAPPDATA`. Start a new editor after installation. Vim needs timer and job support; Neovim uses its built-in job API. Custom runtime/package paths or disabling plugin loading may require sourcing the installed plugin explicitly.
+
+Inside Herdr, the plugin checkpoints saved-file buffers, windows, tabs, folds, cursor positions, and the working directory. Editor events are coalesced into a checkpoint every two seconds, with a safety checkpoint every ten seconds for state changes without reliable events. It reports a resume command through the existing pane API. After a server restart, Herdr starts the same editor and sources its private checkpoint. The normal `[session] resume_agents_on_restore = false` setting disables this.
+
+Checkpoints are stored under `$XDG_STATE_HOME/herdr/vim`, or `~/.local/state/herdr/vim` by default (`LOCALAPPDATA/herdr/vim` on Windows). Each editor process has its own directory, including restored editors. Concurrent restores cannot overwrite each other's checkpoints. On Unix, directories and session files are private to the user, and checkpoint replacement is atomic. A checkpoint is executable Vimscript; do not replace it with an untrusted session file.
+
+Unsaved buffer contents, unnamed scratch text, terminal jobs, and plugin-specific state are not backed up. The plugin never writes modified buffers to source files; use Vim's normal save/recovery facilities for unsaved work. A crash can lose editor-layout changes since the last checkpoint, and Herdr's own snapshot debounce still applies.
+
+Quitting Vim normally releases its resume command. Nested editors launched from an integrated editor do not replace the outer editor's report. Outside Herdr the plugin does nothing. Reports are asynchronous with a short timeout. Uninstall removes only the two managed plugin files; it leaves checkpoint directories for manual cleanup once no saved Herdr sessions need them. It does not report current-file or modified-buffer metadata.
 
 ## Pi
 

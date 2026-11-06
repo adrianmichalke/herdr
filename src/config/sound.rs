@@ -146,6 +146,7 @@ impl AgentSoundOverrides {
             Some(Agent::Letta) => self.letta,
             Some(Agent::Maki) => self.maki,
             Some(Agent::Muse) => self.muse,
+            Some(Agent::Vim) => AgentSoundSetting::Off,
             None => AgentSoundSetting::Default,
         }
     }
@@ -227,6 +228,12 @@ claude = "on"
         assert_eq!(config.ui.sound.agents.claude, AgentSoundSetting::On);
         assert_eq!(config.ui.sound.agents.pi, AgentSoundSetting::Default);
         assert_eq!(config.ui.sound.agents.letta, AgentSoundSetting::Default);
+    }
+
+    #[test]
+    fn vim_does_not_play_agent_completion_sounds() {
+        let config = SoundConfig::default();
+        assert!(!config.allows(Some(Agent::Vim)));
     }
 
     #[test]
