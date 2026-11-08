@@ -778,6 +778,33 @@ fn validate_shared_ssh_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+pub(crate) fn sync_user_file_parents(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let uid = unsafe { libc::geteuid() };
+    for directory in path.ancestors().skip(1) {
+        let file = std::fs::File::open(directory)?;
+        file.sync_all()?;
+        if file.metadata()?.uid() != uid {
+            break;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn user_file_matches_path(file: &std::fs::File, path: &Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let pinned = file.metadata()?;
+    let current = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    Ok(pinned.is_file()
+        && current.is_file()
+        && pinned.uid() == unsafe { libc::geteuid() }
+        && (pinned.dev(), pinned.ino()) == (current.dev(), current.ino()))
+}
+
 pub(crate) struct PinnedSshControlSocket {
     pub(crate) alias: PathBuf,
     original: PathBuf,

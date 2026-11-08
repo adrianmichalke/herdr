@@ -10,6 +10,8 @@ pub(super) fn run_integration_command(args: &[String]) -> std::io::Result<i32> {
         "install" => integration_install(&args[1..]),
         "uninstall" => integration_uninstall(&args[1..]),
         "status" => integration_status(&args[1..]),
+        "vim-process-status" => integration_vim_process_status(&args[1..]),
+        "vim-swap-commit" => integration_vim_swap_commit(&args[1..]),
         "help" | "--help" | "-h" => {
             print_integration_help();
             Ok(0)
@@ -19,6 +21,40 @@ pub(super) fn run_integration_command(args: &[String]) -> std::io::Result<i32> {
             Ok(2)
         }
     }
+}
+
+fn integration_vim_process_status(args: &[String]) -> std::io::Result<i32> {
+    let pid = match args {
+        [pid] => pid.parse::<u32>().ok(),
+        _ => None,
+    };
+    let Some(pid) = pid else {
+        eprintln!("usage: herdr integration vim-process-status <pid>");
+        return Ok(2);
+    };
+    println!("{}", crate::integration::vim_process_status(pid));
+    Ok(0)
+}
+
+fn integration_vim_swap_commit(args: &[String]) -> std::io::Result<i32> {
+    let (original, archive, pid) = match args {
+        [original, archive, pid] => (original, archive, pid.parse::<u32>().ok()),
+        _ => {
+            eprintln!("usage: herdr integration vim-swap-commit <swap> <backup> <pid>");
+            return Ok(2);
+        }
+    };
+    let Some(pid) = pid else {
+        eprintln!("usage: herdr integration vim-swap-commit <swap> <backup> <pid>");
+        return Ok(2);
+    };
+    let status = crate::integration::vim_commit_swap(
+        std::path::Path::new(original),
+        std::path::Path::new(archive),
+        pid,
+    )?;
+    println!("{status}");
+    Ok(0)
 }
 
 fn integration_status(args: &[String]) -> std::io::Result<i32> {

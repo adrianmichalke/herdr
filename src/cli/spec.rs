@@ -292,6 +292,20 @@ fn integration_command() -> Command {
                 .about("Show integration status")
                 .arg(flag("outdated-only")),
         )
+        .subcommand(
+            Command::new("vim-process-status")
+                .about("Check a local Vim swap owner process")
+                .hide(true)
+                .arg(Arg::new("pid").value_name("PID").required(true)),
+        )
+        .subcommand(
+            Command::new("vim-swap-commit")
+                .about("Retire a verified archived Vim swap")
+                .hide(true)
+                .arg(Arg::new("swap").value_name("SWAP").required(true))
+                .arg(Arg::new("backup").value_name("BACKUP").required(true))
+                .arg(Arg::new("pid").value_name("PID").required(true)),
+        )
 }
 
 fn plugin_command() -> Command {

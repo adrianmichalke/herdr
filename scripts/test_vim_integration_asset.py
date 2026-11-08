@@ -1,15 +1,22 @@
+from contextlib import contextmanager
 import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 
 ASSET = Path(__file__).resolve().parents[1] / "src/integration/assets/vim/herdr.vim"
+BACKEND = os.environ.get("HERDR_TEST_BACKEND")
+if BACKEND is None:
+    candidate = ASSET.parents[4] / "target/debug/herdr"
+    BACKEND = str(candidate) if candidate.is_file() else ""
 EDITORS = list(dict.fromkeys(
     path for name in (os.environ.get("HERDR_TEST_VIM", "vim"), os.environ.get("HERDR_TEST_NVIM", "nvim"))
     if (path := shutil.which(name))
@@ -30,7 +37,47 @@ class VimIntegrationAssetTests(unittest.TestCase):
         self.binary = self.root / "herdr-reporter"
         self.binary.write_text(
             f"#!{sys.executable}\n"
-            "import json, os, sys, time\n"
+            "import fcntl, json, os, stat, sys, time\n"
+            "from pathlib import Path\n"
+            "if sys.argv[1:3] == ['integration', 'vim-swap-commit'] and os.environ.get('HERDR_TEST_BACKEND'):\n"
+            "    os.execv(os.environ['HERDR_TEST_BACKEND'], [os.environ['HERDR_TEST_BACKEND'], *sys.argv[1:]])\n"
+            "if sys.argv[1:3] == ['integration', 'vim-process-status']:\n"
+            "    if os.environ.get('HERDR_TEST_PROBE_HANG'): time.sleep(30)\n"
+            "    if os.environ.get('HERDR_TEST_PROBE_COUNTER'):\n"
+            "        counter = Path(os.environ['HERDR_TEST_PROBE_COUNTER'])\n"
+            "        count = int(counter.read_text()) + 1 if counter.exists() else 1\n"
+            "        counter.write_text(str(count))\n"
+            "        if count == 2:\n"
+            "            Path(os.environ['HERDR_TEST_PROBE_READY']).write_text('ready')\n"
+            "            deadline = time.monotonic() + 3\n"
+            "            while not Path(os.environ['HERDR_TEST_PROBE_RELEASE']).exists() and time.monotonic() < deadline: time.sleep(0.01)\n"
+            "    try: os.kill(int(sys.argv[3]), 0)\n"
+            "    except ProcessLookupError: print('exited')\n"
+            "    except PermissionError: print('unknown')\n"
+            "    else: print('running')\n"
+            "    sys.exit(0)\n"
+            "if sys.argv[1:3] == ['integration', 'vim-swap-commit']:\n"
+            "    if os.environ.get('HERDR_TEST_COMMIT_HANG'): time.sleep(30)\n"
+            "    original, archive, pid = sys.argv[3:6]\n"
+            "    try:\n"
+            "        with open(original, 'rb') as source:\n"
+            "            try: fcntl.flock(source, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "            except BlockingIOError: print('busy'); sys.exit(0)\n"
+            "            pinned, current = os.fstat(source.fileno()), os.lstat(original)\n"
+            "            same = lambda a, b: (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)\n"
+            "            if not stat.S_ISREG(current.st_mode) or current.st_uid != os.geteuid() or not same(pinned, current): print('changed'); sys.exit(0)\n"
+            "            if os.path.samefile(original, archive): print('unknown'); sys.exit(0)\n"
+            "            observed = source.read()\n"
+            "            if not observed.startswith(b'b0VIM ') or observed != Path(archive).read_bytes(): print('changed'); sys.exit(0)\n"
+            "            if int(pid) > 0:\n"
+            "                try: os.kill(int(pid), 0)\n"
+            "                except ProcessLookupError: pass\n"
+            "                else: print('changed'); sys.exit(0)\n"
+            "            if not same(pinned, os.lstat(original)): print('changed'); sys.exit(0)\n"
+            "            os.unlink(original)\n"
+            "            print('archived')\n"
+            "    except FileNotFoundError: print('changed')\n"
+            "    sys.exit(0)\n"
             "fd = os.open(os.environ['HERDR_TEST_LOG'], os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)\n"
             "os.write(fd, (json.dumps(sys.argv[1:]) + '\\n').encode())\n"
             "os.close(fd)\n"
@@ -49,6 +96,7 @@ class VimIntegrationAssetTests(unittest.TestCase):
             "HERDR_PANE_ID": "test-pane",
             "HERDR_SOCKET_PATH": str(self.root / "test.sock"),
             "HERDR_TEST_LOG": str(self.log),
+            "HERDR_TEST_BACKEND": BACKEND,
         })
 
     def run_editor(self, editor, script, resume=(), environment=None, installed=False, post_start=False):
@@ -61,7 +109,9 @@ class VimIntegrationAssetTests(unittest.TestCase):
         version = subprocess.check_output([editor, "--version"], text=True)
         flags = ["--headless"] if "NVIM" in version else (["--not-a-term"] if post_start else ["-es"])
         initialization = ["-u", "NORC"] if installed else ["-u", "NONE", "--cmd", f"source {ASSET}"]
-        command = [editor, *flags, *initialization, "-n", "-i", "NONE", *resume, "-S", str(script_path)]
+        swap_dir = self.root / "swap"
+        swap_dir.mkdir(exist_ok=True)
+        command = [editor, *flags, *initialization, "-i", "NONE", "--cmd", "let &directory = " + vim_string(str(swap_dir) + "//"), *resume, "-S", str(script_path)]
         if post_start and "NVIM" not in version:
             master, slave = os.openpty()
             try:
@@ -78,6 +128,245 @@ class VimIntegrationAssetTests(unittest.TestCase):
         else:
             result = subprocess.run(command, env=environment or self.environment, cwd=self.root, capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @contextmanager
+    def swap_owner(self, editor, dirty=True):
+        source = self.root / f"swap-source-{time.time_ns()}.txt"
+        source.write_text("saved\n")
+        swap_dir = self.root / "swap"
+        swap_dir.mkdir(exist_ok=True)
+        ready = self.root / "swap-ready"
+        ready.unlink(missing_ok=True)
+        script = self.root / "swap-owner.vim"
+        script.write_text(f"""
+execute 'edit ' . fnameescape({vim_string(source)})
+{'call setline(1, "unsaved")' if dirty else ''}
+preserve
+call writefile([swapname('%')], {vim_string(ready)})
+sleep 60000m
+""")
+        version = subprocess.check_output([editor, "--version"], text=True)
+        flags = ["--headless"] if "NVIM" in version else ["-es"]
+        environment = self.environment | {"HERDR_ENV": "0"}
+        with (self.root / "swap-owner.log").open("w") as output:
+            process = subprocess.Popen([editor, *flags, "-u", "NONE", "-i", "NONE", "--cmd", "let &directory = " + vim_string(str(swap_dir) + "//"), "-S", str(script)], env=environment, cwd=self.root, stdout=output, stderr=output)
+            try:
+                deadline = time.monotonic() + 5
+                while not (ready.exists() and ready.stat().st_size > 0):
+                    self.assertIsNone(process.poll(), "swap fixture exited before preserving data")
+                    self.assertLess(time.monotonic(), deadline, "swap fixture did not become ready")
+                    time.sleep(0.02)
+                swap = Path(ready.read_text().strip())
+                self.assertTrue(swap.is_file())
+                yield source, swap, process
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+
+    def archives(self):
+        return set((self.root / "state/herdr/vim/recovery").glob("*/recovery.swp"))
+
+    def test_stale_swaps_are_preserved_without_recovery_prompt(self):
+        for editor in EDITORS:
+            for dirty in (False, True):
+                with self.subTest(editor=editor, dirty=dirty), self.swap_owner(editor, dirty) as (source, swap, process):
+                    process.send_signal(signal.SIGKILL)
+                    process.wait(timeout=5)
+                    original = swap.read_bytes()
+                    previous = self.archives()
+                    opened = self.root / "opened.json"
+                    self.run_editor(editor, f"""
+execute 'edit ' . fnameescape({vim_string(source)})
+call writefile([json_encode([getline(1, '$'), &modified, &swapfile])], {vim_string(opened)})
+call writefile(split(execute('HerdrRecoveries'), "\\n"), {vim_string(self.root / 'recoveries-list')})
+sleep 200m
+""", post_start=True)
+                    self.assertEqual(json.loads(opened.read_text()), [["saved"], 0, 1])
+                    self.assertEqual(source.read_text(), "saved\n")
+                    self.assertFalse(swap.exists())
+                    added = self.archives() - previous
+                    if not dirty and not added:
+                        continue
+                    self.assertEqual(len(added), 1)
+                    archive = added.pop()
+                    self.assertEqual(archive.read_bytes(), original)
+                    self.assertIn(str(archive), (self.root / "recoveries-list").read_text())
+                    self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(archive.parent.stat().st_mode & 0o777, 0o700)
+                    record = json.loads((archive.parent / "info.json").read_text())
+                    self.assertEqual(record["file"], str(source))
+                    self.assertEqual(record["info"]["dirty"], int(dirty))
+                    if dirty:
+                        recovered = self.root / "recovered.json"
+                        self.run_editor(editor, f"call writefile([json_encode(getline(1, '$'))], {vim_string(recovered)})", ["-r", str(archive)], environment=self.environment | {"HERDR_ENV": "0"})
+                        self.assertEqual(json.loads(recovered.read_text()), ["unsaved"])
+                        self.assertEqual(source.read_text(), "saved\n")
+
+    def test_installed_package_handles_a_swap_before_opening_the_first_file(self):
+        for root in (self.root / ".vim", self.root / "data/nvim/site"):
+            plugin = root / "pack/herdr/start/herdr/plugin/herdr.vim"
+            plugin.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ASSET, plugin)
+        for editor in EDITORS:
+            with self.subTest(editor=editor), self.swap_owner(editor) as (source, swap, process):
+                process.kill()
+                process.wait(timeout=5)
+                original = swap.read_bytes()
+                previous = self.archives()
+                opened = self.root / "first-file.json"
+                self.run_editor(editor, f"call writefile([json_encode([expand('%:p'), getline(1, '$')])], {vim_string(opened)})", [str(source)], installed=True)
+                self.assertEqual(json.loads(opened.read_text()), [str(source), ["saved"]])
+                added = self.archives() - previous
+                self.assertEqual(len(added), 1)
+                self.assertEqual(added.pop().read_bytes(), original)
+                self.assertFalse(swap.exists())
+
+    def test_swap_handler_leaves_live_editors_alone(self):
+        for editor in EDITORS:
+            with self.subTest(editor=editor), self.swap_owner(editor) as (source, swap, process):
+                previous = self.archives()
+                decision = self.root / "swap-decision"
+                self.run_editor(editor, f"""
+autocmd SwapExists * call writefile([v:swapchoice], {vim_string(decision)}) | let v:swapchoice = 'q'
+execute 'edit ' . fnameescape({vim_string(source)})
+""")
+                self.assertNotEqual(decision.read_text().strip(), "d")
+                self.assertIsNone(process.poll())
+                self.assertTrue(swap.is_file())
+                self.assertEqual(self.archives(), previous)
+
+    def test_failed_archive_preserves_original_swap(self):
+        blocked = self.root / "state/herdr/vim/recovery"
+        blocked.parent.mkdir(parents=True)
+        blocked.write_text("not a directory")
+        for editor in EDITORS:
+            with self.subTest(editor=editor), self.swap_owner(editor) as (source, swap, process):
+                process.kill()
+                process.wait(timeout=5)
+                original = swap.read_bytes()
+                decision = self.root / "swap-decision"
+                self.run_editor(editor, f"""
+autocmd SwapExists * call writefile([v:swapchoice], {vim_string(decision)}) | let v:swapchoice = 'q'
+execute 'edit ' . fnameescape({vim_string(source)})
+""")
+                self.assertNotEqual(decision.read_text().strip(), "d")
+                self.assertEqual(swap.read_bytes(), original)
+                self.assertEqual(blocked.read_text(), "not a directory")
+
+    def test_swap_handler_does_not_archive_foreign_host_recovery_data(self):
+        for editor in EDITORS:
+            with self.subTest(editor=editor), self.swap_owner(editor) as (source, swap, process):
+                process.kill()
+                process.wait(timeout=5)
+                hostname = os.uname().nodename.encode()
+                original = swap.read_bytes()
+                self.assertEqual(original.count(hostname + b"\0"), 1)
+                foreign = original.replace(hostname + b"\0", b"x" * len(hostname) + b"\0")
+                swap.write_bytes(foreign)
+                previous = self.archives()
+                decision = self.root / "swap-decision"
+                self.run_editor(editor, f"""
+autocmd SwapExists * call writefile([v:swapchoice], {vim_string(decision)}) | let v:swapchoice = 'q'
+execute 'edit ' . fnameescape({vim_string(source)})
+""")
+                self.assertNotEqual(decision.read_text().strip(), "d")
+                self.assertEqual(swap.read_bytes(), foreign)
+                self.assertEqual(self.archives(), previous)
+
+    def test_stale_swap_outside_herdr_is_not_archived(self):
+        for editor in EDITORS:
+            with self.subTest(editor=editor), self.swap_owner(editor) as (source, swap, process):
+                process.kill()
+                process.wait(timeout=5)
+                original = swap.read_bytes()
+                previous = self.archives()
+                self.run_editor(editor, f"""
+autocmd SwapExists * let v:swapchoice = 'q'
+execute 'edit ' . fnameescape({vim_string(source)})
+""", environment=self.environment | {"HERDR_ENV": "0"})
+                self.assertEqual(swap.read_bytes(), original)
+                self.assertEqual(self.archives(), previous)
+
+    def test_unresponsive_process_probe_preserves_swap_and_does_not_hang_vim(self):
+        editors = [editor for editor in EDITORS if "NVIM" not in subprocess.check_output([editor, "--version"], text=True)]
+        if not editors:
+            self.skipTest("requires Vim's process-liveness helper")
+        commands = self.root / "bin"
+        commands.mkdir()
+        (commands / "herdr").symlink_to(self.binary)
+        for editor in editors:
+            with self.subTest(editor=editor), self.swap_owner(editor) as (source, swap, process):
+                process.kill()
+                process.wait(timeout=5)
+                original = swap.read_bytes()
+                decision = self.root / "swap-decision"
+                self.run_editor(editor, f"""
+autocmd SwapExists * call writefile([v:swapchoice], {vim_string(decision)}) | let v:swapchoice = 'q'
+execute 'edit ' . fnameescape({vim_string(source)})
+""", environment=self.environment | {"HERDR_TEST_PROBE_HANG": "1", "PATH": str(commands)})
+                self.assertNotEqual(decision.read_text().strip(), "d")
+                self.assertEqual(swap.read_bytes(), original)
+                self.assertFalse(self.archives())
+
+    def test_concurrent_reopen_never_removes_another_editors_live_swap(self):
+        editors = [editor for editor in EDITORS if "NVIM" not in subprocess.check_output([editor, "--version"], text=True)]
+        if not editors:
+            self.skipTest("requires Vim's process-liveness helper")
+        for editor in editors:
+            with self.subTest(editor=editor), self.swap_owner(editor) as (source, swap, owner):
+                owner.kill()
+                owner.wait(timeout=5)
+                pending = self.root / "probe-pending"
+                release = self.root / "probe-release"
+                children = []
+
+                def launch(tag, delayed=False):
+                    script = self.root / f"open-{tag}.vim"
+                    ready = self.root / f"ready-{tag}"
+                    script.write_text(f"""
+autocmd SwapExists * if empty(v:swapchoice) | let v:swapchoice = 'e' | endif
+execute 'edit ' . fnameescape({vim_string(source)})
+call setline(1, 'unsaved editor {tag}')
+preserve
+call writefile([swapname('%')], {vim_string(ready)})
+sleep 60000m
+""")
+                    environment = self.environment.copy()
+                    if delayed:
+                        environment.update(HERDR_TEST_PROBE_COUNTER=str(self.root / "probe-counter"), HERDR_TEST_PROBE_READY=str(pending), HERDR_TEST_PROBE_RELEASE=str(release))
+                    with (self.root / f"open-{tag}.log").open("w") as output:
+                        process = subprocess.Popen([editor, "-es", "-u", "NONE", "-i", "NONE", "--cmd", "source " + str(ASSET), "--cmd", "let &directory = " + vim_string(str(self.root / "swap") + "//"), "-S", str(script)], env=environment, cwd=self.root, stdout=output, stderr=output)
+                    children.append(process)
+                    return ready
+
+                try:
+                    ready_b = launch("B", delayed=True)
+                    deadline = time.monotonic() + 3
+                    while not pending.exists():
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.01)
+                    ready_a = launch("A")
+                    deadline = time.monotonic() + 0.35
+                    while not (ready_a.exists() and ready_a.stat().st_size > 0) and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    release.write_text("continue")
+                    deadline = time.monotonic() + 5
+                    while not all(path.exists() and path.stat().st_size > 0 for path in (ready_a, ready_b)):
+                        self.assertLess(time.monotonic(), deadline)
+                        self.assertTrue(all(process.poll() is None for process in children))
+                        time.sleep(0.01)
+                    for tag, ready in (("A", ready_a), ("B", ready_b)):
+                        active = Path(ready.read_text().strip())
+                        self.assertTrue(active.exists(), f"editor {tag}'s live swap was removed")
+                        self.assertTrue(f"unsaved editor {tag}".encode() in active.read_bytes(), f"editor {tag}'s live swap was replaced")
+                    self.assertEqual(source.read_text(), "saved\n")
+                finally:
+                    release.touch()
+                    for process in children:
+                        if process.poll() is None:
+                            process.kill()
+                        process.wait(timeout=5)
 
     def reports(self):
         if not self.log.exists():

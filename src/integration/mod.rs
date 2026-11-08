@@ -34,7 +34,9 @@ pub(crate) use types::{
 /// agent registry provides first-class target registration.
 pub(crate) const EXPERIMENTAL_INTEGRATION_TARGET_LABELS: &[&str] = &["letta", "vim"];
 
-pub(crate) use vim::{install_vim, uninstall_vim, vim_integration_statuses};
+pub(crate) use vim::{
+    install_vim, uninstall_vim, vim_commit_swap, vim_integration_statuses, vim_process_status,
+};
 
 const PI_EXTENSION_INSTALL_NAME: &str = "herdr-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/herdr-agent-state.ts");

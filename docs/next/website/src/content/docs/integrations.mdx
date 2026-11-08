@@ -86,7 +86,15 @@ Inside Herdr, the plugin checkpoints saved-file buffers, windows, tabs, folds, c
 
 Checkpoints are stored under `$XDG_STATE_HOME/herdr/vim`, or `~/.local/state/herdr/vim` by default (`LOCALAPPDATA/herdr/vim` on Windows). Each editor process has its own directory, including restored editors. Concurrent restores cannot overwrite each other's checkpoints. On Unix, directories and session files are private to the user, and checkpoint replacement is atomic. A checkpoint is executable Vimscript; do not replace it with an untrusted session file.
 
-Unsaved buffer contents, unnamed scratch text, terminal jobs, and plugin-specific state are not backed up. The plugin never writes modified buffers to source files; use Vim's normal save/recovery facilities for unsaved work. A crash can lose editor-layout changes since the last checkpoint, and Herdr's own snapshot debounce still applies.
+Layout checkpoints do not back up unsaved buffer contents, unnamed scratch text, terminal jobs, or plugin-specific state. The plugin never writes modified buffers to source files. A crash can lose editor-layout changes since the last checkpoint, and Herdr's own snapshot debounce still applies.
+
+### Swap recovery
+
+Vim integration version `2` handles verified stale swap files automatically inside Herdr on Unix. When the swap belongs to the current user on the current host and its owner process is confirmed dead, Herdr saves a byte-for-byte recovery copy and its metadata under the private `herdr/vim/recovery` state directory before removing the stale swap under an OS lock. Reopening then loads the current file normally, without the repeated swap-recovery menu and without disabling swap protection.
+
+Unsaved recovery data is preserved, not silently applied over a potentially newer file. A short notice appears when modified recovery data was saved. Run `:HerdrRecoveries` inside the editor to list the original files and commands for recovering archived swaps into a buffer for review. Recovery itself does not write over the current file.
+
+Active editors, foreign-host or foreign-user swaps, existing user-selected swap actions, and uncertain process state retain Vim's normal handling. Removal uses an OS lock and checks the original file's identity and bytes against the durable backup, so concurrent restores cannot delete a replacement editor's live swap. Windows retains its normal swap handling. If backup creation or verification fails, the original swap is left untouched and Vim can still ask what to do. Classic Vim uses a bounded local Herdr CLI process check where needed; unsupported or unavailable checks are treated conservatively. Outside Herdr, no swap handling is changed.
 
 Quitting Vim normally releases its resume command. Nested editors launched from an integrated editor do not replace the outer editor's report. Outside Herdr the plugin does nothing. Reports are asynchronous with a short timeout. Uninstall removes only the two managed plugin files; it leaves checkpoint directories for manual cleanup once no saved Herdr sessions need them. It does not report current-file or modified-buffer metadata.
 
