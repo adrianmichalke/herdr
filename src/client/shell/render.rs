@@ -9,7 +9,9 @@ mod tabs;
 
 pub(super) use super::agent_sidebar::{ordered_agent_pane_ids, render_agent_panel};
 pub(super) use super::aggregate_navigation::navigator_rows as client_navigator_rows;
-pub(super) use overlays::{render_client_overlay, render_context_menu, render_global_menu};
+pub(super) use overlays::{
+    render_client_overlay, render_context_menu, render_global_menu, render_session_picker_overlay,
+};
 pub(super) use sidebar::{render_collapsed_sidebar, render_sidebar, workspace_entries};
 pub(super) use tabs::{render_tab_bar, tab_bar_status_width};
 
@@ -263,24 +265,36 @@ pub(super) fn render_shell(
             buffer,
             layout.mobile_header,
             snapshot,
+            super::sessions::active_session_name(state.endpoints, state.active_endpoint_id),
             config,
             &mut hits,
         );
     }
     if layout.sidebar.width > 0 {
-        if state.endpoints.len() > 1 {
+        render_sidebar_background(buffer, layout.sidebar, &config.palette);
+        let sidebar = super::sessions::render_sidebar_selector(
+            buffer,
+            layout.sidebar,
+            state.endpoints,
+            state.active_endpoint_id,
+            &config.palette,
+            &mut hits,
+        );
+        if state
+            .endpoints
+            .iter()
+            .filter(|endpoint| !endpoint.session_hidden)
+            .count()
+            > 1
+        {
             if state.sidebar_collapsed {
                 super::endpoint_sidebar::render_collapsed(
-                    buffer,
-                    layout.sidebar,
-                    config,
-                    &mut state,
-                    &mut hits,
+                    buffer, sidebar, config, &mut state, &mut hits,
                 );
             } else {
                 super::endpoint_sidebar::render_expanded(
                     buffer,
-                    layout.sidebar,
+                    sidebar,
                     Some(snapshot),
                     config,
                     &mut state,
@@ -290,39 +304,70 @@ pub(super) fn render_shell(
         } else if state.sidebar_collapsed {
             render_collapsed_sidebar(
                 buffer,
-                layout.sidebar,
+                sidebar,
                 snapshot,
                 config,
                 state
                     .endpoints
                     .iter()
-                    .find(|endpoint| endpoint.endpoint_id == *state.active_endpoint_id)
+                    .find(|endpoint| {
+                        !endpoint.session_hidden
+                            && endpoint.endpoint_id == *state.active_endpoint_id
+                    })
                     .map(|endpoint| &endpoint.agent_recency),
+                state.active_endpoint_id,
                 state
                     .selected_workspace_id
                     .map(|target| target.workspace_id.as_str()),
                 &mut hits,
             );
         } else {
-            render_sidebar(
-                buffer,
-                layout.sidebar,
-                snapshot,
-                config,
-                &mut state,
-                &mut hits,
-            );
+            render_sidebar(buffer, sidebar, snapshot, config, &mut state, &mut hits);
         }
     }
+    let compact_selector = if layout.sidebar.is_empty() && layout.mobile_header.is_empty() {
+        let area = if !layout.tab_bar.is_empty() {
+            layout.tab_bar
+        } else {
+            layout.pane_surface
+        };
+        Some(Rect::new(
+            area.x,
+            area.y,
+            area.width.min(24).min((area.width / 2).max(1)),
+            area.height.min(1),
+        ))
+    } else {
+        None
+    };
     if layout.tab_bar.height > 0 {
+        let tab_bar = if let Some(selector) = compact_selector {
+            Rect::new(
+                selector.right(),
+                layout.tab_bar.y,
+                layout.tab_bar.width.saturating_sub(selector.width),
+                layout.tab_bar.height,
+            )
+        } else {
+            layout.tab_bar
+        };
         render_tab_bar(
             buffer,
-            layout.tab_bar,
+            tab_bar,
             snapshot,
             config,
             state.tab_scroll,
             state.reveal_focused_tab,
             state.tab_drag_insert_index,
+            &mut hits,
+        );
+    }
+    if let Some(selector) = compact_selector {
+        super::sessions::render_selector(
+            buffer,
+            selector,
+            super::sessions::active_session_name(state.endpoints, state.active_endpoint_id),
+            &config.palette,
             &mut hits,
         );
     }

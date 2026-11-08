@@ -51,6 +51,8 @@ pub(crate) struct ClientShellConfig {
     pub(super) preferences: preferences::ClientChromePreferences,
     pub(super) startup_config_diagnostic: Option<String>,
     pub(super) startup_onboarding: bool,
+    pub(super) initial_session_name: String,
+    pub(super) root_remote_target: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +85,7 @@ pub(super) enum ClientMobileTarget {
 
 #[derive(Default)]
 pub(super) struct ShellHitMap {
+    pub(super) session_selector: Rect,
     pub(super) machines: Vec<MachineHit>,
     pub(super) workspaces: Vec<WorkspaceHit>,
     pub(super) workspace_body: Rect,
@@ -252,6 +255,19 @@ pub(crate) enum ClientShellAction {
         endpoint_id: ClientEndpointId,
         target: Option<ClientEndpointFocusTarget>,
     },
+    SessionList {
+        machine: ClientEndpointId,
+        request_id: u64,
+    },
+    SessionOpen {
+        machine: ClientEndpointId,
+        request_id: u64,
+        session: String,
+        create: bool,
+    },
+    SessionCancel {
+        request_id: u64,
+    },
     ReplayMouse(Vec<crossterm::event::MouseEvent>),
     Keybind(crate::input::KeybindAction),
 }
@@ -291,6 +307,7 @@ pub(super) enum ClientShellOverlayKind {
     ContextMenu,
     GlobalMenu,
     Settings,
+    SessionPicker,
 }
 
 #[derive(Debug)]
@@ -510,6 +527,7 @@ pub(super) struct ClientWorktreeRemoveOverlay {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientContextMenuAction {
+    Sessions,
     Rename,
     Close,
     NewWorktree,
@@ -529,6 +547,9 @@ pub(super) enum ClientContextMenuAction {
 
 #[derive(Debug)]
 pub(super) enum ClientContextMenuTarget {
+    Machine {
+        endpoint_id: ClientEndpointId,
+    },
     Workspace {
         workspace_id: String,
         is_git: bool,
@@ -594,6 +615,7 @@ pub(super) enum ClientShellOverlay {
     ContextMenu(ClientContextMenuOverlay),
     GlobalMenu(ClientGlobalMenuOverlay),
     Settings(ClientSettingsOverlay),
+    SessionPicker(super::sessions::SessionPickerOverlay),
 }
 
 impl ClientShellOverlay {
@@ -612,6 +634,7 @@ impl ClientShellOverlay {
             Self::ContextMenu(_) => ClientShellOverlayKind::ContextMenu,
             Self::GlobalMenu(_) => ClientShellOverlayKind::GlobalMenu,
             Self::Settings(_) => ClientShellOverlayKind::Settings,
+            Self::SessionPicker(_) => ClientShellOverlayKind::SessionPicker,
         }
     }
 }
@@ -905,6 +928,7 @@ pub(crate) struct ClientShellState {
     pub(super) pending_workspace_highlight: Option<PendingWorkspaceHighlight>,
     pub(super) reveal_navigation_workspace: bool,
     pub(super) overlay: Option<ClientShellOverlay>,
+    pub(super) session_picker_serial: u64,
     pub(super) previous_pane_id: Option<String>,
     pub(super) pane_mouse_gesture: Option<ClientPaneMouseGesture>,
     pub(super) link_hover: Option<super::link_hover::LinkHover>,
@@ -995,10 +1019,16 @@ pub(super) struct WorkspaceEntry {
 
 impl ClientShellState {
     pub(crate) fn new(mut config: ClientShellConfig) -> Self {
-        let agent_recency =
+        let mut agent_recency =
             super::agent_recency::AgentRecencyCache::load(config.preferences_path.as_deref());
         let mut local = local_endpoint();
-        local.agent_recency = agent_recency.ranks(&ClientEndpointId::Local);
+        local.session_name = config.initial_session_name.clone();
+        agent_recency.qualify_initial(
+            &ClientEndpointId::Local,
+            &local.session_name,
+            std::time::Instant::now(),
+        );
+        local.agent_recency = agent_recency.ranks(&local.recency_id());
         let preferences = config.preferences.clone();
         let local_config_diagnostic = config.startup_config_diagnostic.take();
         let overlay = config
@@ -1084,6 +1114,7 @@ impl ClientShellState {
             pending_workspace_highlight: None,
             reveal_navigation_workspace: false,
             overlay,
+            session_picker_serial: 0,
             previous_pane_id: None,
             pane_mouse_gesture: None,
             link_hover: None,
@@ -1167,7 +1198,7 @@ impl ClientShellState {
         if endpoint_id.is_local() {
             Some(&self.collapsed_groups)
         } else {
-            self.remote_collapsed_groups.get(endpoint_id)
+            self.remote_collapsed_groups.get(endpoint_id.machine_ref())
         }
     }
 
@@ -1181,7 +1212,7 @@ impl ClientShellState {
             &mut self.collapsed_groups
         } else {
             self.remote_collapsed_groups
-                .entry(endpoint_id.clone())
+                .entry(endpoint_id.machine_id())
                 .or_default()
         };
         if !groups.remove(&key) {
@@ -1276,10 +1307,16 @@ impl ClientShellState {
         self.endpoint_error_deadline = None;
         self.navigate_workspace_id = None;
         self.pending_workspace_highlight = None;
-        self.overlay = self
-            .config
-            .startup_onboarding
-            .then_some(ClientShellOverlay::Onboarding);
+        let picker = self
+            .overlay
+            .take()
+            .filter(|overlay| matches!(overlay, ClientShellOverlay::SessionPicker(_)));
+        self.overlay = picker.or_else(|| {
+            self.config
+                .startup_onboarding
+                .then_some(ClientShellOverlay::Onboarding)
+        });
+        self.word_selection_generation = self.word_selection_generation.saturating_add(1);
         self.previous_pane_id = None;
         self.pane_mouse_gesture = None;
         self.link_hover = None;
@@ -1310,10 +1347,14 @@ impl ClientShellState {
         snapshot
             .commands
             .retain(|command| command.action != crate::protocol::ClientShellCommandAction::Unknown);
-        let graphics_scope = match &self.active_endpoint_id {
-            // Local direct uploads use image IDs authored by the server from its boot ID.
-            ClientEndpointId::Local => snapshot.boot_id.clone(),
-            endpoint_id => format!("{}:{}", endpoint_id.storage_key(), snapshot.boot_id),
+        let graphics_scope = if self.active_endpoint_id.is_local() {
+            snapshot.boot_id.clone()
+        } else {
+            format!(
+                "{}:{}",
+                self.active_endpoint_id.storage_key(),
+                snapshot.boot_id
+            )
         };
         let endpoint_boot_changed =
             self.snapshot.is_some() && self.graphics.scope() != graphics_scope;
@@ -1686,7 +1727,11 @@ impl ClientShellState {
             self.navigate_workspace_id = None;
             if !matches!(
                 self.overlay.as_ref(),
-                Some(ClientShellOverlay::Onboarding | ClientShellOverlay::ProductAnnouncement(_))
+                Some(
+                    ClientShellOverlay::Onboarding
+                        | ClientShellOverlay::ProductAnnouncement(_)
+                        | ClientShellOverlay::SessionPicker(_)
+                )
             ) {
                 self.overlay = self
                     .config

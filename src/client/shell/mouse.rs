@@ -683,6 +683,70 @@ impl ClientShellState {
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
         self.update_link_hover(mouse, outcome);
         let point = (mouse.column, mouse.row);
+        if matches!(
+            self.overlay,
+            Some(ClientShellOverlay::SessionPicker(_) | ClientShellOverlay::GlobalMenu(_))
+        ) && self
+            .pane_mouse_gesture
+            .as_ref()
+            .is_some_and(|gesture| mouse.kind == MouseEventKind::Up(gesture.button))
+        {
+            if let Some(gesture) = self.pane_mouse_gesture.take() {
+                let modifiers = mouse.modifiers.difference(gesture.stripped_modifiers);
+                self.push_pane_mouse_event(&gesture.hit, mouse, modifiers, outcome);
+            }
+            return;
+        }
+        if self.handle_session_picker_mouse(mouse, outcome) {
+            return;
+        }
+        if self.overlay.is_none()
+            && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && super::contains(self.hits.session_selector, point)
+            && !super::contains(self.hits.notification_toast, point)
+        {
+            self.open_session_picker(outcome);
+            return;
+        }
+        if matches!(self.overlay, Some(ClientShellOverlay::GlobalMenu(_))) {
+            let row_hit = self
+                .hits
+                .global_menu_rows
+                .iter()
+                .find(|(rect, _)| super::contains(*rect, point))
+                .copied();
+            match mouse.kind {
+                MouseEventKind::Moved => {
+                    if let (Some((_, index)), Some(ClientShellOverlay::GlobalMenu(menu))) =
+                        (row_hit, self.overlay.as_mut())
+                    {
+                        menu.highlighted = index;
+                        outcome.repaint = true;
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if super::contains(self.hits.global_launcher, point) {
+                        self.toggle_global_menu();
+                        outcome.repaint = true;
+                    } else if let Some((_, index)) = row_hit {
+                        self.activate_global_menu_item(index, outcome);
+                    } else {
+                        self.overlay = None;
+                        outcome.repaint = true;
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    self.move_global_menu_selection(-1);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::ScrollDown => {
+                    self.move_global_menu_selection(1);
+                    outcome.repaint = true;
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.mode == ClientShellMode::Navigate
             && self.workspace_preview_action_blocked()
             && self.overlay.is_none()
@@ -1383,37 +1447,6 @@ impl ClientShellState {
                 return;
             }
         }
-        if matches!(self.overlay, Some(ClientShellOverlay::GlobalMenu(_))) {
-            let row_hit = self
-                .hits
-                .global_menu_rows
-                .iter()
-                .find(|(rect, _)| super::contains(*rect, point))
-                .copied();
-            match mouse.kind {
-                MouseEventKind::Moved => {
-                    if let (Some((_, index)), Some(ClientShellOverlay::GlobalMenu(menu))) =
-                        (row_hit, self.overlay.as_mut())
-                    {
-                        menu.highlighted = index;
-                        outcome.repaint = true;
-                    }
-                }
-                MouseEventKind::Down(MouseButton::Left) => {
-                    if super::contains(self.hits.global_launcher, point) {
-                        self.toggle_global_menu();
-                        outcome.repaint = true;
-                    } else if let Some((_, index)) = row_hit {
-                        self.activate_global_menu_item(index, outcome);
-                    } else {
-                        self.overlay = None;
-                        outcome.repaint = true;
-                    }
-                }
-                _ => {}
-            }
-            return;
-        }
         if matches!(self.overlay, Some(ClientShellOverlay::ContextMenu(_))) {
             let row_hit = self
                 .hits
@@ -1833,6 +1866,30 @@ impl ClientShellState {
                     }
                 }
                 if !self.config.mouse_capture {
+                    return;
+                }
+                if let Some(endpoint_id) = self
+                    .hits
+                    .machines
+                    .iter()
+                    .find(|hit| super::contains(hit.rect, point))
+                    .map(|hit| hit.endpoint_id.clone())
+                    .or_else(|| {
+                        self.hits.mobile_targets.iter().find_map(|(rect, target)| {
+                            if !super::contains(*rect, point) {
+                                return None;
+                            }
+                            match target {
+                                ClientMobileTarget::Machine(endpoint_id) => {
+                                    Some(endpoint_id.clone())
+                                }
+                                _ => None,
+                            }
+                        })
+                    })
+                {
+                    self.open_machine_context_menu(endpoint_id, mouse.column, mouse.row);
+                    outcome.repaint = true;
                     return;
                 }
                 let workspace_id = (!self.sidebar_collapsed)

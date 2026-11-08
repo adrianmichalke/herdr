@@ -201,12 +201,11 @@ impl EndpointCatalog {
     }
 
     pub(crate) fn select_endpoint(&mut self, endpoint_id: &super::ClientEndpointId) -> bool {
-        match endpoint_id {
-            super::ClientEndpointId::Local => {
-                self.select_local();
-                true
-            }
-            super::ClientEndpointId::Ssh(profile_id) => self.select_ssh(profile_id),
+        if let Some(profile_id) = endpoint_id.ssh_profile_id() {
+            self.select_ssh(profile_id)
+        } else {
+            self.select_local();
+            true
         }
     }
 

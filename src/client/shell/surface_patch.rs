@@ -74,6 +74,8 @@ fn fast_path_blocker(
         Some("client_surface_patch.fallback.copy_feedback")
     } else if state.link_hover_blocks_patch(patch) {
         Some("client_surface_patch.fallback.link_hover")
+    } else if state.session_selector_blocks_patch(patch) {
+        Some("client_surface_patch.fallback.session_selector")
     } else if state.selection.is_some() {
         Some("client_surface_patch.fallback.selection")
     } else if state.copy_mode.is_some() {

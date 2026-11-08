@@ -26,6 +26,7 @@ pub(super) fn cached_endpoint_snapshots(
     endpoints
         .iter()
         .enumerate()
+        .filter(|(_, endpoint)| !endpoint.session_hidden)
         .filter_map(|(endpoint_index, endpoint)| {
             endpoint
                 .snapshot
@@ -301,11 +302,16 @@ pub(super) fn navigator_rows(
         words.iter().all(|word| value.contains(word))
     };
     let filtering = navigator.filter.is_some() || !query.is_empty();
-    let federated = endpoints.len() > 1;
+    let federated = endpoints
+        .iter()
+        .filter(|endpoint| !endpoint.session_hidden)
+        .take(2)
+        .count()
+        > 1;
     let depth_offset = u8::from(federated);
     let mut rows = Vec::new();
 
-    for endpoint in endpoints {
+    for endpoint in endpoints.iter().filter(|endpoint| !endpoint.session_hidden) {
         let stale = endpoint.status != ClientEndpointStatus::Online;
         let endpoint_query_matches = !query.is_empty() && text(&endpoint.label);
         let mut endpoint_rows = Vec::new();

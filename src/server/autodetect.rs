@@ -9,7 +9,8 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use tracing::info;
 
@@ -98,17 +99,17 @@ fn is_server_listening_at(socket_path: &Path) -> io::Result<bool> {
     }
 }
 
-fn read_server_status() -> io::Result<Option<crate::api::RuntimeStatus>> {
-    crate::api::read_runtime_status_at(&crate::api::socket_path(), STATUS_REQUEST_TIMEOUT)
-}
-
 #[cfg(windows)]
-fn client_protocol_accepts_hello(socket_path: &Path) -> io::Result<bool> {
+fn client_protocol_accepts_hello(socket_path: &Path, cancelled: &AtomicBool) -> io::Result<bool> {
     if !socket_path.exists() {
         return Ok(false);
     }
 
-    let mut stream = match crate::ipc::connect_local_stream(socket_path) {
+    let mut stream = match crate::ipc::connect_local_stream_cancellable(
+        socket_path,
+        cancelled,
+        Instant::now() + STATUS_REQUEST_TIMEOUT,
+    ) {
         Ok(stream) => stream,
         Err(err)
             if matches!(
@@ -153,10 +154,23 @@ fn client_protocol_accepts_hello(socket_path: &Path) -> io::Result<bool> {
 }
 
 fn validate_running_server_compatibility(saved_federation: bool) -> io::Result<()> {
-    let Some(status) = read_server_status()? else {
+    validate_running_server_compatibility_at(
+        &crate::api::socket_path(),
+        saved_federation,
+        &crate::session::active_restart_after_update_guidance(),
+    )
+}
+
+fn validate_running_server_compatibility_at(
+    api_socket: &Path,
+    saved_federation: bool,
+    restart_guidance: &str,
+) -> io::Result<()> {
+    let Some(status) = crate::api::read_runtime_status_at(api_socket, STATUS_REQUEST_TIMEOUT)?
+    else {
         return Err(io::Error::other(format!(
             "a herdr server is listening, but its status API is unavailable.\n\n{}\nIf that fails, stop the old server process manually.",
-            crate::session::active_restart_after_update_guidance()
+            restart_guidance
         )));
     };
 
@@ -183,7 +197,7 @@ fn validate_running_server_compatibility(saved_federation: bool) -> io::Result<(
             .unwrap_or_else(|| "unavailable".to_string()),
         crate::build_info::version(),
         crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION,
-        crate::session::active_restart_after_update_guidance()
+        restart_guidance
     )))
 }
 
@@ -202,6 +216,10 @@ fn validate_running_server_compatibility(saved_federation: bool) -> io::Result<(
 ///
 /// Returns the PID of the spawned server process.
 pub fn spawn_server_daemon() -> io::Result<u32> {
+    spawn_server_daemon_for_session(None)
+}
+
+fn spawn_server_daemon_for_session(session: Option<&str>) -> io::Result<u32> {
     let exe = std::env::current_exe().map_err(|err| {
         io::Error::new(
             err.kind(),
@@ -211,7 +229,10 @@ pub fn spawn_server_daemon() -> io::Result<u32> {
 
     info!(exe = %exe.display(), "spawning server daemon");
 
-    let mut command = build_server_daemon_command(exe);
+    let mut command = match session {
+        Some(name) => build_session_server_daemon_command(exe, name),
+        None => build_server_daemon_command(exe),
+    };
 
     let pid =
         crate::platform::launch_server_daemon_command(&mut command).map_err(|err: io::Error| {
@@ -250,6 +271,88 @@ fn build_server_daemon_command(exe: PathBuf) -> Command {
     command
 }
 
+fn build_session_server_daemon_command(exe: PathBuf, name: &str) -> Command {
+    let mut command = build_server_daemon_command(exe);
+    command.arg("--session").arg(name);
+    for key in [
+        crate::api::SOCKET_PATH_ENV_VAR,
+        super::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR,
+        crate::session::SESSION_ENV_VAR,
+        crate::integration::HERDR_PANE_ID_ENV_VAR,
+        crate::integration::HERDR_TAB_ID_ENV_VAR,
+        crate::integration::HERDR_WORKSPACE_ID_ENV_VAR,
+        "HERDR_PANE_RUNTIME_ID",
+        "HERDR_ACTIVE_PANE_ID",
+        "HERDR_ACTIVE_TAB_ID",
+        "HERDR_ACTIVE_WORKSPACE_ID",
+        crate::remote::REMOTE_PREFERENCES_ENV_VAR,
+        crate::remote::REMOTE_KEYBINDINGS_ENV_VAR,
+        crate::remote::REATTACH_COMMAND_ENV_VAR,
+    ] {
+        command.env_remove(key);
+    }
+    command
+}
+
+pub fn ensure_session_server(name: &str, cancelled: &AtomicBool) -> io::Result<PathBuf> {
+    let session = crate::session::parse_target_name(name)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    check_startup_cancelled(cancelled)?;
+    let socket_path = crate::session::client_socket_path_for(session.as_deref());
+    if is_session_server_listening_at(&socket_path, cancelled)? {
+        let restart_guidance = crate::session::restart_after_update_guidance(
+            &crate::session::stop_command_for(Some(name)),
+            Some(&format!("herdr session attach {name}")),
+        );
+        validate_running_server_compatibility_at(
+            &crate::session::api_socket_path_for(session.as_deref()),
+            false,
+            &restart_guidance,
+        )?;
+    } else {
+        check_startup_cancelled(cancelled)?;
+        spawn_server_daemon_for_session(Some(name))?;
+        wait_for_server_socket_cancellable(
+            &socket_path,
+            SERVER_READY_TIMEOUT,
+            cancelled,
+            &crate::session::data_dir_for(session.as_deref()).join("herdr-server.log"),
+        )?;
+    }
+    check_startup_cancelled(cancelled)?;
+    Ok(socket_path)
+}
+
+fn check_startup_cancelled(cancelled: &AtomicBool) -> io::Result<()> {
+    if cancelled.load(Ordering::Acquire) {
+        Err(io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "session startup cancelled",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn is_session_server_listening_at(socket_path: &Path, cancelled: &AtomicBool) -> io::Result<bool> {
+    match crate::ipc::connect_local_stream_cancellable(
+        socket_path,
+        cancelled,
+        Instant::now() + STATUS_REQUEST_TIMEOUT,
+    ) {
+        Ok(_) => Ok(true),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Socket readiness
 // ---------------------------------------------------------------------------
@@ -260,30 +363,48 @@ fn build_server_daemon_command(exe: PathBuf) -> Command {
 /// or the timeout elapses. Returns an error if the server doesn't become
 /// ready within the timeout.
 pub fn wait_for_server_socket(socket_path: &Path, timeout: Duration) -> io::Result<()> {
-    let deadline = std::time::Instant::now() + timeout;
+    wait_for_server_socket_cancellable(
+        socket_path,
+        timeout,
+        &AtomicBool::new(false),
+        &crate::session::data_dir().join("herdr-server.log"),
+    )
+}
 
-    while std::time::Instant::now() < deadline {
+fn wait_for_server_socket_cancellable(
+    socket_path: &Path,
+    timeout: Duration,
+    cancelled: &AtomicBool,
+    log_path: &Path,
+) -> io::Result<()> {
+    let deadline = Instant::now() + timeout;
+
+    while Instant::now() < deadline {
+        check_startup_cancelled(cancelled)?;
         #[cfg(windows)]
-        if client_protocol_accepts_hello(socket_path)? {
+        if client_protocol_accepts_hello(socket_path, cancelled)? {
+            check_startup_cancelled(cancelled)?;
             info!(path = %socket_path.display(), "server client protocol ready");
             return Ok(());
         }
 
         #[cfg(not(windows))]
-        if is_server_listening_at(socket_path)? {
+        if is_session_server_listening_at(socket_path, cancelled)? {
+            check_startup_cancelled(cancelled)?;
             info!(path = %socket_path.display(), "server socket ready");
             return Ok(());
         }
         std::thread::sleep(SOCKET_POLL_INTERVAL);
     }
 
+    check_startup_cancelled(cancelled)?;
     Err(io::Error::new(
         io::ErrorKind::TimedOut,
         format!(
             "server did not become ready within {}s (socket: {}). The background server may still be starting; try `herdr` again, or check {}",
             timeout.as_secs(),
             socket_path.display(),
-            crate::session::data_dir().join("herdr-server.log").display()
+            log_path.display()
         ),
     ))
 }
@@ -342,6 +463,113 @@ pub fn auto_detect_launch(saved_federation: bool) -> io::Result<()> {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn explicit_session_startup_validates_names_before_io() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "../other",
+            "work session",
+            "a/b",
+            "a\\b",
+            "é",
+        ] {
+            let error = ensure_session_server(name, &AtomicBool::new(false)).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{name}");
+        }
+        assert_eq!(
+            ensure_session_server(&"a".repeat(65), &AtomicBool::new(false))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn explicit_session_startup_honors_cancellation_before_io() {
+        for name in ["default", "work", "--work", "a.b_c-1"] {
+            let error = ensure_session_server(name, &AtomicBool::new(true)).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted, "{name}");
+        }
+    }
+
+    #[test]
+    fn explicit_session_daemon_command_clears_inherited_identity_without_mutating_env() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        for name in ["default", "work", "--work"] {
+            let keys = [
+                crate::api::SOCKET_PATH_ENV_VAR,
+                super::super::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR,
+                crate::session::SESSION_ENV_VAR,
+                crate::integration::HERDR_PANE_ID_ENV_VAR,
+                crate::integration::HERDR_TAB_ID_ENV_VAR,
+                crate::integration::HERDR_WORKSPACE_ID_ENV_VAR,
+                "HERDR_PANE_RUNTIME_ID",
+                "HERDR_ACTIVE_PANE_ID",
+                "HERDR_ACTIVE_TAB_ID",
+                "HERDR_ACTIVE_WORKSPACE_ID",
+                crate::remote::REMOTE_PREFERENCES_ENV_VAR,
+                crate::remote::REMOTE_KEYBINDINGS_ENV_VAR,
+                crate::remote::REATTACH_COMMAND_ENV_VAR,
+            ];
+            let inherited: Vec<_> = keys.iter().map(std::env::var_os).collect();
+            let command = build_session_server_daemon_command(PathBuf::from("herdr"), name);
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                ["server", "--session", name]
+            );
+            let envs: Vec<_> = command.get_envs().collect();
+            for (key, before) in keys.iter().zip(inherited) {
+                assert!(envs
+                    .iter()
+                    .any(|(entry, value)| *entry == OsStr::new(key) && value.is_none()));
+                assert_eq!(std::env::var_os(key), before);
+            }
+        }
+    }
+
+    #[test]
+    fn readiness_wait_honors_cancellation_without_starting_or_stopping_a_daemon() {
+        let error = wait_for_server_socket_cancellable(
+            Path::new("unused-session-client.sock"),
+            Duration::from_secs(15),
+            &AtomicBool::new(true),
+            Path::new("unused-session-server.log"),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+    }
+
+    #[test]
+    fn readiness_polling_observes_later_cancellation() {
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let stop = std::sync::Arc::clone(&cancelled);
+        let cancel = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            stop.store(true, Ordering::Release);
+        });
+        let socket = std::env::temp_dir().join(format!(
+            "herdr-cancel-readiness-{}-absent.sock",
+            std::process::id()
+        ));
+        let error = wait_for_server_socket_cancellable(
+            &socket,
+            Duration::from_secs(5),
+            &cancelled,
+            Path::new("unused-session-server.log"),
+        )
+        .unwrap_err();
+        cancel.join().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+    }
+}
 
 #[cfg(all(test, windows))]
 mod windows_tests {
@@ -414,11 +642,10 @@ mod tests {
     use std::ffi::OsStr;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
 
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::config::test_config_env_lock()
     }
 
     fn unique_test_dir(name: &str) -> std::path::PathBuf {

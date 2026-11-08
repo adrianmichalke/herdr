@@ -4,6 +4,62 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn initial_recency_migrates_to_an_explicit_session_scope_once() {
+    let machine = remote();
+    let now = Instant::now();
+    let mut cache = AgentRecencyCache::load(None);
+    cache.observe(&machine, &projected("boot", &[("pane_1", 1)]), None, now);
+    let initial = rank(&cache, &machine, "pane_1");
+    cache.qualify_initial(&machine, "initial", now);
+    let scoped = machine.with_session("initial").unwrap();
+    assert_eq!(rank(&cache, &scoped, "pane_1"), initial);
+    assert!(cache.ranks(&machine).is_empty());
+    cache.qualify_initial(&machine, "configured-edit", now);
+    assert_eq!(rank(&cache, &scoped, "pane_1"), initial);
+    assert!(cache
+        .ranks(&machine.with_session("configured-edit").unwrap())
+        .is_empty());
+}
+
+#[test]
+fn enabled_machine_retains_recency_for_other_sessions_with_colliding_panes() {
+    let machine = remote();
+    let first = machine.with_session("first").unwrap();
+    let second = machine.with_session("second").unwrap();
+    let local = ClientEndpointId::Local;
+    let now = Instant::now();
+    let mut cache = AgentRecencyCache::load(None);
+    for endpoint in [&first, &second, &local] {
+        cache.observe(
+            endpoint,
+            &projected("same-boot", &[("pane_1", 1)]),
+            None,
+            now,
+        );
+    }
+    let first_rank = rank(&cache, &first, "pane_1");
+    let second_rank = rank(&cache, &second, "pane_1");
+    assert_ne!(first_rank, second_rank);
+    cache.retain_endpoints(
+        [machine.storage_key(), local.storage_key()].into_iter(),
+        now,
+    );
+    assert_eq!(rank(&cache, &first, "pane_1"), first_rank);
+    assert_eq!(rank(&cache, &second, "pane_1"), second_rank);
+    cache.observe(
+        &second,
+        &projected("same-boot", &[("pane_1", 2)]),
+        None,
+        now,
+    );
+    assert_eq!(rank(&cache, &first, "pane_1"), first_rank);
+    assert!(rank(&cache, &second, "pane_1") > second_rank);
+    cache.retain_endpoints([local.storage_key()].into_iter(), now);
+    assert!(cache.ranks(&first).is_empty());
+    assert!(cache.ranks(&second).is_empty());
+}
+
 struct TestPaths(PathBuf);
 
 impl TestPaths {

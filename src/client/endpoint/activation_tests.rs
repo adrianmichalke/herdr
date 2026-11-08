@@ -1,5 +1,366 @@
 use super::*;
 
+fn local_session_fixture() -> (
+    crate::client::ClientShellState,
+    EndpointRegistry,
+    ClientEndpointId,
+    SentMessages,
+    SentMessages,
+) {
+    let (mut shell, mut endpoints, source_sent, target_sent) = shell_and_registry();
+    let source = ClientEndpointId::Local;
+    endpoints.insert(
+        source.clone(),
+        FakeTransport {
+            sent: source_sent.clone(),
+            fail_after_write: false,
+        },
+        41,
+        negotiation(),
+        true,
+    );
+    shell.set_endpoint_snapshot_for_generation(
+        &source,
+        41,
+        Box::new(test_snapshot("shared-boot", 1)),
+    );
+    let target = source.with_session("second").unwrap();
+    assert!(shell.stage_session_endpoint(&source, target.clone(), "second".into()));
+    shell.set_endpoint_status(&target, ClientEndpointStatus::Online);
+    shell.cache_endpoint_snapshot_inactive_for_generation(
+        &target,
+        97,
+        Box::new(test_snapshot("shared-boot", 1)),
+    );
+    endpoints.insert(
+        target.clone(),
+        FakeTransport {
+            sent: target_sent.clone(),
+            fail_after_write: false,
+        },
+        97,
+        negotiation(),
+        false,
+    );
+    (shell, endpoints, target, source_sent, target_sent)
+}
+
+#[test]
+fn same_machine_local_session_waits_for_the_actual_source_generation_ack() {
+    let (shell, mut endpoints, target, source_sent, target_sent) = local_session_fixture();
+    let mut activation = PendingEndpointActivation::begin(
+        &shell,
+        &mut endpoints,
+        target.clone(),
+        None,
+        resize(),
+        401,
+        Instant::now(),
+    )
+    .unwrap();
+    assert!(activation.is_session_handoff());
+    assert_eq!(activation.source.generation, 41);
+    assert_eq!(activation.target.generation, 97);
+    assert!(matches!(
+        activation.phase,
+        ActivationPhase::ReleasingSource { .. }
+    ));
+    assert!(!endpoints.active_surface_available());
+    assert!(target_sent.lock().unwrap().is_empty());
+    let request = "client-shell-surface:401:off";
+    assert_eq!(
+        activation.receive_response(
+            &ClientEndpointId::Local,
+            1,
+            request,
+            &surface_success(request, false, 1),
+            &mut endpoints
+        ),
+        SurfaceActivationProgress::Stale
+    );
+    assert!(target_sent.lock().unwrap().is_empty());
+    assert_eq!(
+        activation.receive_response(
+            &ClientEndpointId::Local,
+            41,
+            request,
+            &surface_success(request, false, 1),
+            &mut endpoints
+        ),
+        SurfaceActivationProgress::Pending
+    );
+    assert_eq!(
+        source_sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(surface_set_active)
+            .collect::<Vec<_>>(),
+        vec![false]
+    );
+    assert_eq!(
+        target_sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(surface_set_active)
+            .collect::<Vec<_>>(),
+        vec![true]
+    );
+}
+
+#[test]
+fn session_preflight_failure_never_writes_to_or_freezes_the_source() {
+    let (shell, mut endpoints, target, source_sent, target_sent) = local_session_fixture();
+    endpoints.insert(
+        target.clone(),
+        FakeTransport {
+            sent: target_sent,
+            fail_after_write: false,
+        },
+        97,
+        Default::default(),
+        false,
+    );
+    assert!(matches!(
+        PendingEndpointActivation::prepare(
+            &shell,
+            &endpoints,
+            target,
+            None,
+            resize(),
+            402,
+            Instant::now()
+        ),
+        Err(ActivationBeginError::Preflight(_))
+    ));
+    assert!(endpoints.active_surface_available());
+    assert_eq!(endpoints.active_id(), &ClientEndpointId::Local);
+    assert!(source_sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn session_cancel_after_source_off_restores_without_replacing_the_source_lease() {
+    let (shell, mut endpoints, target, source_sent, target_sent) = local_session_fixture();
+    let mut activation = PendingEndpointActivation::begin(
+        &shell,
+        &mut endpoints,
+        target,
+        None,
+        resize(),
+        403,
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(
+        activation.rollback(&mut endpoints, "cancelled".into(), false),
+        ActivationRollback::Pending
+    );
+    assert!(matches!(
+        activation.phase,
+        ActivationPhase::RestoringSource { .. }
+    ));
+    assert_eq!(activation.source.generation, 41);
+    assert!(endpoints.accepts(&ClientEndpointId::Local, 41));
+    assert!(target_sent.lock().unwrap().is_empty());
+    assert_eq!(
+        source_sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(surface_set_active)
+            .collect::<Vec<_>>(),
+        vec![false, true]
+    );
+}
+
+#[test]
+fn failed_target_off_revokes_only_candidate_and_restores_live_source() {
+    struct FailRevocation(SentMessages);
+    impl super::super::EndpointTransport for FailRevocation {
+        fn send(&mut self, message: &crate::protocol::ClientMessage) -> std::io::Result<()> {
+            self.0.lock().unwrap().push(message.clone());
+            if surface_set_active(message) == Some(false) {
+                return Err(std::io::Error::other("target-off failed after observation"));
+            }
+            Ok(())
+        }
+    }
+    let (mut shell, mut endpoints, target, source_sent, target_sent) = local_session_fixture();
+    endpoints.insert(
+        target.clone(),
+        FailRevocation(target_sent),
+        97,
+        negotiation(),
+        false,
+    );
+    let mut activation = PendingEndpointActivation::begin(
+        &shell,
+        &mut endpoints,
+        target.clone(),
+        None,
+        resize(),
+        404,
+        Instant::now(),
+    )
+    .unwrap();
+    let request = "client-shell-surface:404:off";
+    activation.receive_response(
+        &ClientEndpointId::Local,
+        41,
+        request,
+        &surface_success(request, false, 1),
+        &mut endpoints,
+    );
+    assert_eq!(
+        activation.rollback(&mut endpoints, "cancelled".into(), false),
+        ActivationRollback::Pending
+    );
+    assert!(endpoints.connection(&target).is_none());
+    assert!(endpoints.accepts(&ClientEndpointId::Local, 41));
+    assert!(matches!(
+        activation.phase,
+        ActivationPhase::RestoringSource { .. }
+    ));
+    assert_eq!(
+        source_sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(surface_set_active)
+            .collect::<Vec<_>>(),
+        vec![false, true]
+    );
+    for request in [
+        "client-shell-surface:404:rollback-source-on",
+        "client-shell-surface:404:presentation-sync",
+    ] {
+        assert_eq!(
+            activation.receive_response(
+                &ClientEndpointId::Local,
+                41,
+                request,
+                &surface_success(request, true, 1),
+                &mut endpoints
+            ),
+            SurfaceActivationProgress::Pending
+        );
+        let snapshot = test_snapshot("shared-boot", 1);
+        activation.receive_snapshot(&ClientEndpointId::Local, 41, &snapshot);
+        shell.cache_endpoint_snapshot_inactive_for_generation(
+            &ClientEndpointId::Local,
+            41,
+            Box::new(snapshot),
+        );
+        assert_eq!(
+            activation.receive_surface(
+                &ClientEndpointId::Local,
+                41,
+                surface("shared-boot", 1, "pane_1")
+            ),
+            SurfaceActivationProgress::Ready
+        );
+        let completion = activation.complete(&mut shell, &mut endpoints).unwrap();
+        assert!(matches!(
+            completion,
+            ActivationCompletion::AwaitingPresentationSync { .. }
+                | ActivationCompletion::AwaitingPresentationEffects
+        ));
+        assert!(!endpoints.active_surface_available());
+    }
+    let token = match &activation.phase {
+        ActivationPhase::AwaitingPresentationEffects { token, .. } => token.clone(),
+        phase => panic!("unexpected rollback phase: {phase:?}"),
+    };
+    assert_eq!(
+        activation.receive_presentation_effects_ready(&ClientEndpointId::Local, 40, &token),
+        SurfaceActivationProgress::Stale
+    );
+    assert_eq!(
+        activation.receive_presentation_effects_ready(&ClientEndpointId::Local, 41, &token),
+        SurfaceActivationProgress::Ready
+    );
+    assert!(matches!(
+        activation.complete(&mut shell, &mut endpoints).unwrap(),
+        ActivationCompletion::RestoredSource { .. }
+    ));
+    endpoints.unfreeze_input();
+    assert!(endpoints.active_surface_available());
+    assert!(shell.endpoint_is_active(&ClientEndpointId::Local));
+    assert!(endpoints.accepts(&ClientEndpointId::Local, 41));
+}
+
+#[test]
+fn rapid_selection_during_source_effects_fence_keeps_the_live_restoration() {
+    let (mut shell, mut endpoints, source_sent, target_sent) = shell_and_registry();
+    let mut activation = machine();
+    activation.phase = ActivationPhase::AwaitingPresentationEffects {
+        lease: activation.source.clone(),
+        token: "source-effects".into(),
+        ready: false,
+        completion: Box::new(ActivationCompletion::RestoredSource {
+            error: "cancelled".into(),
+            successor: None,
+        }),
+    };
+    assert!(activation.restoring_source());
+    assert_eq!(
+        activation.supersede(endpoint(), None, &mut endpoints),
+        ActivationRollback::Pending
+    );
+    assert!(matches!(
+        activation.phase,
+        ActivationPhase::AwaitingPresentationEffects { .. }
+    ));
+    assert!(source_sent.lock().unwrap().is_empty());
+    assert!(target_sent.lock().unwrap().is_empty());
+    activation.receive_presentation_effects_ready(&ClientEndpointId::Local, 1, "source-effects");
+    assert!(
+        matches!(activation.complete(&mut shell, &mut endpoints).unwrap(),
+        ActivationCompletion::RestoredSource { successor: Some(intent), .. } if intent.endpoint_id == endpoint())
+    );
+}
+
+#[test]
+fn rollback_never_replays_a_source_lease_into_a_replacement_generation() {
+    let (shell, mut endpoints, target, source_sent, _) = local_session_fixture();
+    let mut activation = PendingEndpointActivation::begin(
+        &shell,
+        &mut endpoints,
+        target,
+        None,
+        resize(),
+        405,
+        Instant::now(),
+    )
+    .unwrap();
+    let replacement = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    endpoints.insert(
+        ClientEndpointId::Local,
+        FakeTransport {
+            sent: replacement.clone(),
+            fail_after_write: false,
+        },
+        42,
+        negotiation(),
+        false,
+    );
+    assert!(matches!(
+        activation.rollback(&mut endpoints, "cancelled".into(), false),
+        ActivationRollback::Unavailable(_)
+    ));
+    assert!(replacement.lock().unwrap().is_empty());
+    assert_eq!(
+        source_sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(surface_set_active)
+            .collect::<Vec<_>>(),
+        vec![false]
+    );
+}
+
 fn endpoint() -> ClientEndpointId {
     ClientEndpointId::Ssh(
         super::super::ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
@@ -232,6 +593,7 @@ fn machine() -> PendingEndpointActivation {
     PendingEndpointActivation {
         source: lease(ClientEndpointId::Local, 1, "local-boot"),
         source_available: true,
+        session_handoff: false,
         target: lease(endpoint(), 7, "remote-boot"),
         focus: None,
         host_focused: true,
@@ -257,6 +619,7 @@ fn source_off_request_is_distinct_and_precedes_target_on_phase() {
     let activation = PendingEndpointActivation {
         source: lease(ClientEndpointId::Local, 1, "local-boot"),
         source_available: true,
+        session_handoff: false,
         target: lease(endpoint(), 7, "remote-boot"),
         focus: None,
         host_focused: true,

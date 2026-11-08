@@ -336,7 +336,8 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
                 &mut buffer,
                 state.hits.global_launcher,
                 menu,
-                snapshot,
+                Some(snapshot),
+                true,
                 &state.config.palette,
             ),
             _ => render::render_client_overlay(

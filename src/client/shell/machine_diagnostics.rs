@@ -37,7 +37,8 @@ impl MachineDiagnostics {
 
 /// Saved machines wait out a reconnect backoff whenever they are not online or disabled.
 fn machine_retryable(endpoint: &ClientShellEndpoint) -> bool {
-    !endpoint.endpoint_id.is_local()
+    !endpoint.session_hidden
+        && !endpoint.endpoint_id.is_local()
         && matches!(
             endpoint.status,
             ClientEndpointStatus::Connecting
@@ -85,7 +86,7 @@ impl ClientShellState {
     /// Asks for an immediate connection attempt instead of waiting out the backoff.
     /// Returns false when the machine has no pending reconnect to bring forward.
     pub(super) fn retry_machine(&mut self, id: &ClientEndpointId) -> bool {
-        let ClientEndpointId::Ssh(profile_id) = id else {
+        let Some(profile_id) = id.ssh_profile_id() else {
             return false;
         };
         if !self
@@ -171,7 +172,7 @@ impl ClientShellState {
     }
 
     fn show_machine_diagnostic(&mut self, id: &ClientEndpointId) {
-        let ClientEndpointId::Ssh(profile_id) = id else {
+        let Some(profile_id) = id.ssh_profile_id() else {
             return;
         };
         let Some(error) = self.machine_diagnostics.errors.get(id) else {

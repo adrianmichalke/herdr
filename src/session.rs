@@ -17,7 +17,7 @@ const MIN_SOCKET_TIMEOUT: Duration = Duration::from_millis(1);
 
 static EXPLICIT_SESSION_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionInfo {
     pub name: String,
     pub default: bool,
@@ -1122,6 +1122,28 @@ mod tests {
         assert!(validate_name("../prod").is_err());
         assert!(validate_name("").is_err());
         assert!(validate_name("work session").is_err());
+    }
+
+    #[test]
+    fn session_info_decodes_optional_connection_errors() {
+        let mut value = serde_json::json!({
+            "name": "default",
+            "default": true,
+            "running": false,
+            "socket_path": "/sessions/herdr.sock",
+            "session_dir": "/sessions"
+        });
+        let info: SessionInfo = serde_json::from_value(value.clone()).unwrap();
+        assert!(info.default);
+        assert!(info.connection_error.is_none());
+
+        value["connection_error"] = "permission denied".into();
+        let info: SessionInfo = serde_json::from_value(value).unwrap();
+        assert_eq!(info.connection_error.as_deref(), Some("permission denied"));
+        assert_eq!(
+            serde_json::from_str::<SessionInfo>(&serde_json::to_string(&info).unwrap()).unwrap(),
+            info
+        );
     }
 
     #[test]

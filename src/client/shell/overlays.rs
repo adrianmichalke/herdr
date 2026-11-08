@@ -61,6 +61,7 @@ pub(crate) fn render_client_overlay(
         ClientShellOverlay::ReleaseNotes(v) => {
             render_release_notes_overlay(b, v, &s.update_install_command, p)
         }
+        ClientShellOverlay::SessionPicker(v) => render_session_picker_overlay(b, v, p),
         ClientShellOverlay::Rename(v) => render_rename_overlay(b, v, p),
         ClientShellOverlay::ConfirmClose(v) => render_confirm_close_overlay(b, v, p),
         ClientShellOverlay::Help(v) => render_help_overlay(b, v, k, p),
@@ -83,11 +84,281 @@ pub(crate) fn render_client_overlay(
     }
 }
 
+pub(in crate::client::shell) fn render_session_picker_overlay(
+    buffer: &mut Buffer,
+    picker: &super::super::sessions::SessionPickerOverlay,
+    palette: &Palette,
+) -> Option<OverlayRender> {
+    let height = if picker.new_name.is_some() {
+        9
+    } else {
+        (picker.entries.len().min(12) as u16 + 7).max(10)
+    };
+    let area = popup(buffer.area, 68, height).unwrap_or(buffer.area);
+    if area.is_empty() {
+        return None;
+    }
+    let inner = if area.width >= 4 && area.height >= 4 {
+        panel(buffer, area, palette.accent, palette.panel_bg)?
+    } else {
+        buffer.set_style(
+            area,
+            Style::default()
+                .fg(palette.text)
+                .bg(palette.panel_bg)
+                .remove_modifier(Modifier::DIM),
+        );
+        area
+    };
+    let mut rendered = OverlayRender {
+        area,
+        navigator_popup: area,
+        ..OverlayRender::default()
+    };
+    let heading_rows = if inner.height >= 5 { 2 } else { 0 };
+    if heading_rows > 0 {
+        put_text(
+            buffer,
+            inner.x,
+            inner.y,
+            inner.width,
+            &format!(
+                "{} · {}",
+                if picker.new_name.is_some() {
+                    "New session"
+                } else {
+                    "Sessions"
+                },
+                picker.machine_label
+            ),
+            Style::default()
+                .fg(palette.text)
+                .bg(palette.panel_bg)
+                .add_modifier(Modifier::BOLD),
+        );
+        put_text(
+            buffer,
+            inner.x,
+            inner.y + 1,
+            inner.width,
+            &format!("current: {}", picker.current),
+            Style::default().fg(palette.overlay0).bg(palette.panel_bg),
+        );
+    }
+    let footer_rows = u16::from(inner.height >= 2);
+    let message_rows = u16::from(inner.height >= 4);
+    let body = Rect::new(
+        inner.x,
+        inner.y + heading_rows,
+        inner.width,
+        inner
+            .height
+            .saturating_sub(heading_rows + footer_rows + message_rows),
+    );
+    let text_style = Style::default().fg(palette.text).bg(palette.panel_bg);
+    if let Some(input) = picker.new_name.as_ref() {
+        if !body.is_empty() {
+            let input_area = Rect::new(body.x, body.y, body.width, 1);
+            buffer.set_style(
+                input_area,
+                Style::default().fg(palette.text).bg(palette.surface0),
+            );
+            rendered.worktree_search = input_area;
+            rendered.cursor = text_editor::render(
+                buffer,
+                input_area,
+                input,
+                Style::default().fg(palette.text).bg(palette.surface0),
+            )
+            .filter(|_| !picker.switching);
+        }
+    } else if picker.loaded && !picker.loading {
+        let visible = usize::from(body.height);
+        let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+        for index in (start..=picker.entries.len()).take(visible) {
+            let rect = Rect::new(body.x, body.y + (index - start) as u16, body.width, 1);
+            let selected = index == picker.selected;
+            let style = if selected {
+                Style::default()
+                    .fg(contrast(palette))
+                    .bg(palette.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                text_style
+            };
+            buffer.set_style(rect, style);
+            if let Some(entry) = picker.entries.get(index) {
+                let current = entry.name == picker.current;
+                let status = if entry.connection_error.is_some() {
+                    "unavailable"
+                } else if entry.running {
+                    "running"
+                } else {
+                    "stopped"
+                };
+                let compact = rect.width < 28;
+                let status = if compact {
+                    if entry.connection_error.is_some() {
+                        "!"
+                    } else if entry.running {
+                        "run"
+                    } else {
+                        "stop"
+                    }
+                    .to_owned()
+                } else if current {
+                    format!("current · {status}")
+                } else {
+                    status.to_owned()
+                };
+                let budget = rect.width.saturating_sub((rect.width / 2).max(6));
+                let status_width = if compact && budget < 3 {
+                    0
+                } else {
+                    display_width(&status).min(budget)
+                };
+                let name_width = rect
+                    .width
+                    .saturating_sub(status_width + u16::from(status_width > 0));
+                let marker = if current {
+                    if rect.width < 12 {
+                        "✓"
+                    } else {
+                        "✓ "
+                    }
+                } else if compact {
+                    ""
+                } else {
+                    "  "
+                };
+                put_text(
+                    buffer,
+                    rect.x,
+                    rect.y,
+                    name_width,
+                    &crate::ui::truncate_end(
+                        &format!("{marker}{}", entry.name),
+                        usize::from(name_width),
+                    ),
+                    if current {
+                        style.add_modifier(Modifier::BOLD)
+                    } else {
+                        style
+                    },
+                );
+                put_right_text(
+                    buffer,
+                    rect,
+                    rect.y,
+                    &crate::ui::truncate_end(&status, usize::from(status_width)),
+                    style,
+                );
+            } else {
+                put_text(buffer, rect.x, rect.y, rect.width, "+ New session", style);
+            }
+            rendered.worktree_rows.push((rect, index));
+        }
+    } else if !body.is_empty() {
+        put_text(
+            buffer,
+            body.x,
+            body.y,
+            body.width,
+            if picker.loading {
+                "loading sessions…"
+            } else {
+                "r reload · esc cancel"
+            },
+            text_style,
+        );
+    }
+    if message_rows > 0 {
+        let selected_error = picker
+            .entries
+            .get(picker.selected)
+            .and_then(|entry| entry.connection_error.as_deref());
+        let message = if picker.switching {
+            "opening session… esc cancels"
+        } else {
+            picker
+                .error
+                .as_deref()
+                .or(selected_error)
+                .unwrap_or("↑↓ select · ↵ open · n new · esc cancel")
+        };
+        put_text(
+            buffer,
+            inner.x,
+            inner.bottom().saturating_sub(footer_rows + 1),
+            inner.width,
+            message,
+            Style::default()
+                .fg(if picker.error.is_some() || selected_error.is_some() {
+                    palette.red
+                } else {
+                    palette.overlay0
+                })
+                .bg(palette.panel_bg),
+        );
+    }
+    if footer_rows > 0 {
+        let gap = u16::from(inner.width >= 8);
+        let form = picker.new_name.is_some();
+        let available = inner.width.saturating_sub(gap * if form { 1 } else { 2 });
+        let widths = if form {
+            vec![available / 2, available - available / 2]
+        } else {
+            vec![
+                available / 2,
+                available / 4,
+                available - available / 2 - available / 4,
+            ]
+        };
+        let buttons = row(inner, &widths, gap, inner.height - 1);
+        let normal = Style::default()
+            .fg(palette.text)
+            .bg(palette.surface0)
+            .add_modifier(Modifier::BOLD);
+        let enabled = picker.loaded && !picker.loading && !picker.switching;
+        rendered.primary = buttons[0];
+        button(
+            buffer,
+            buttons[0],
+            if form { "↵ create" } else { "+ New session" },
+            if enabled {
+                Style::default()
+                    .fg(contrast(palette))
+                    .bg(palette.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                normal.add_modifier(Modifier::DIM)
+            },
+        );
+        if !form {
+            rendered.clear = buttons[1];
+            button(buffer, buttons[1], "r reload", normal);
+        }
+        rendered.cancel = buttons[buttons.len() - 1];
+        button(
+            buffer,
+            rendered.cancel,
+            if form && !picker.switching {
+                "esc back"
+            } else {
+                "esc cancel"
+            },
+            normal,
+        );
+    }
+    Some(rendered)
+}
+
 pub(crate) fn render_global_menu(
     buffer: &mut Buffer,
     launcher: Rect,
     menu: &ClientGlobalMenuOverlay,
-    snapshot: &ClientShellSnapshot,
+    snapshot: Option<&ClientShellSnapshot>,
+    overlays_available: bool,
     palette: &Palette,
 ) -> Option<OverlayRender> {
     let items = super::super::global_menu::global_menu_items(snapshot);
@@ -96,9 +367,9 @@ pub(crate) fn render_global_menu(
         .iter()
         .map(|(label, action)| {
             display_width(label)
-                + u16::from(super::super::global_menu::global_menu_item_has_badge(
-                    snapshot, *action,
-                )) * 2
+                + u16::from(snapshot.is_some_and(|snapshot| {
+                    super::super::global_menu::global_menu_item_has_badge(snapshot, *action)
+                })) * 2
         })
         .max()
         .unwrap_or(8)
@@ -115,14 +386,33 @@ pub(crate) fn render_global_menu(
     let rect = Rect::new(x, y, width, height);
     let inner = panel(buffer, rect, palette.accent, palette.panel_bg)?;
     let mut rows = Vec::new();
-    for (index, (label, action)) in items.iter().enumerate() {
-        let row_y = inner.y.saturating_add(index as u16);
+    let visible = usize::from(inner.height);
+    let start = menu
+        .highlighted
+        .saturating_sub(visible.saturating_sub(1))
+        .min(items.len().saturating_sub(visible));
+    for (index, (label, action)) in items.iter().enumerate().skip(start) {
+        let row_y = inner.y.saturating_add((index - start) as u16);
         if row_y >= inner.bottom() {
             break;
         }
         let row = Rect::new(inner.x, row_y, inner.width, 1);
         let highlighted = index == menu.highlighted;
-        let style = if highlighted {
+        let enabled = super::super::global_menu::global_menu_action_enabled(
+            snapshot,
+            overlays_available,
+            *action,
+        );
+        let style = if !enabled {
+            Style::default()
+                .fg(palette.overlay0)
+                .bg(if highlighted {
+                    palette.surface0
+                } else {
+                    palette.panel_bg
+                })
+                .add_modifier(Modifier::DIM)
+        } else if highlighted {
             Style::default()
                 .fg(panel_contrast_fg(palette))
                 .bg(palette.accent)
@@ -131,7 +421,9 @@ pub(crate) fn render_global_menu(
             Style::default().fg(palette.text).bg(palette.panel_bg)
         };
         buffer.set_style(row, style);
-        let has_badge = super::super::global_menu::global_menu_item_has_badge(snapshot, *action);
+        let has_badge = snapshot.is_some_and(|snapshot| {
+            super::super::global_menu::global_menu_item_has_badge(snapshot, *action)
+        });
         if has_badge {
             let badge_style = if highlighted {
                 style

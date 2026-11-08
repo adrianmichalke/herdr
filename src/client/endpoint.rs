@@ -74,17 +74,53 @@ impl fmt::Display for ProfileId {
 pub(crate) enum ClientEndpointId {
     Local,
     Ssh(ProfileId),
+    Session {
+        machine: Box<ClientEndpointId>,
+        name: String,
+    },
 }
 
 impl ClientEndpointId {
     pub(crate) fn is_local(&self) -> bool {
-        matches!(self, Self::Local)
+        match self {
+            Self::Local => true,
+            Self::Ssh(_) => false,
+            Self::Session { machine, .. } => machine.is_local(),
+        }
+    }
+
+    pub(crate) fn machine_ref(&self) -> &Self {
+        match self {
+            Self::Session { machine, .. } => machine.machine_ref(),
+            machine => machine,
+        }
+    }
+
+    pub(crate) fn machine_id(&self) -> Self {
+        self.machine_ref().clone()
+    }
+
+    pub(crate) fn ssh_profile_id(&self) -> Option<&ProfileId> {
+        match self {
+            Self::Local => None,
+            Self::Ssh(profile) => Some(profile),
+            Self::Session { machine, .. } => machine.ssh_profile_id(),
+        }
+    }
+
+    pub(crate) fn with_session(&self, name: &str) -> Result<Self, String> {
+        crate::session::parse_target_name(name)?;
+        Ok(Self::Session {
+            machine: Box::new(self.machine_id()),
+            name: name.to_owned(),
+        })
     }
 
     pub(crate) fn storage_key(&self) -> String {
         match self {
             Self::Local => "local".into(),
             Self::Ssh(profile_id) => format!("ssh:{profile_id}"),
+            Self::Session { machine, name } => format!("{}:session:{name}", machine.storage_key()),
         }
     }
 }
@@ -101,6 +137,25 @@ pub(crate) enum ClientEndpointStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_ids_preserve_machine_identity_without_aliasing_sessions() {
+        let local = ClientEndpointId::Local;
+        let profile = ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let remote = ClientEndpointId::Ssh(profile.clone());
+        for machine in [local, remote] {
+            let first = machine.with_session("agents").unwrap();
+            let second = first.with_session("default").unwrap();
+            assert_eq!(first.machine_id(), machine);
+            assert_eq!(second.machine_id(), machine);
+            assert_eq!(first.ssh_profile_id(), machine.ssh_profile_id());
+            assert_eq!(first.is_local(), machine.is_local());
+            assert_ne!(first.storage_key(), second.storage_key());
+            assert_ne!(first.storage_key(), machine.storage_key());
+            assert_eq!(second, machine.with_session("default").unwrap());
+            assert!(machine.with_session("../wrong").is_err());
+        }
+    }
 
     #[test]
     fn profile_ids_are_opaque_and_stable_when_parsed() {

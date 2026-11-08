@@ -4,6 +4,7 @@ use super::*;
 pub(super) enum ClientGlobalMenuAction {
     Binding(crate::input::KeybindAction),
     WhatsNew,
+    Sessions,
 }
 
 pub(super) fn global_menu_attention(snapshot: &ClientShellSnapshot) -> bool {
@@ -20,7 +21,7 @@ pub(super) fn global_menu_item_has_badge(
 }
 
 pub(super) fn global_menu_items(
-    snapshot: &ClientShellSnapshot,
+    snapshot: Option<&ClientShellSnapshot>,
 ) -> Vec<(&'static str, ClientGlobalMenuAction)> {
     let mut items = vec![
         (
@@ -36,9 +37,11 @@ pub(super) fn global_menu_items(
             ClientGlobalMenuAction::Binding(crate::input::KeybindAction::ReloadConfig),
         ),
     ];
-    if snapshot.update_available.is_some() || snapshot.latest_release_notes_available {
+    if snapshot.is_some_and(|snapshot| {
+        snapshot.update_available.is_some() || snapshot.latest_release_notes_available
+    }) {
         items.push((
-            if snapshot.update_available.is_some() {
+            if snapshot.is_some_and(|snapshot| snapshot.update_available.is_some()) {
                 "update ready"
             } else {
                 "what's new"
@@ -50,7 +53,24 @@ pub(super) fn global_menu_items(
         "detach",
         ClientGlobalMenuAction::Binding(crate::input::KeybindAction::Detach),
     ));
+    items.push(("sessions", ClientGlobalMenuAction::Sessions));
     items
+}
+
+pub(super) fn global_menu_action_enabled(
+    snapshot: Option<&ClientShellSnapshot>,
+    overlays_available: bool,
+    action: ClientGlobalMenuAction,
+) -> bool {
+    match action {
+        ClientGlobalMenuAction::Binding(
+            crate::input::KeybindAction::Settings | crate::input::KeybindAction::Help,
+        ) => snapshot.is_some() && overlays_available,
+        ClientGlobalMenuAction::WhatsNew => {
+            overlays_available && snapshot.is_some_and(|snapshot| snapshot.release_notes.is_some())
+        }
+        _ => true,
+    }
 }
 
 impl ClientShellState {
@@ -65,11 +85,7 @@ impl ClientShellState {
     }
 
     pub(super) fn move_global_menu_selection(&mut self, delta: isize) {
-        let item_count = self
-            .snapshot
-            .as_deref()
-            .map(global_menu_items)
-            .map_or(0, |items| items.len());
+        let item_count = global_menu_items(self.snapshot.as_deref()).len();
         let Some(ClientShellOverlay::GlobalMenu(menu)) = self.overlay.as_mut() else {
             return;
         };
@@ -82,20 +98,17 @@ impl ClientShellState {
         index: usize,
         outcome: &mut ClientShellInput,
     ) {
-        let Some(action) = self.snapshot.as_deref().and_then(|snapshot| {
-            global_menu_items(snapshot)
-                .get(index)
-                .map(|(_, action)| *action)
-        }) else {
+        let Some(action) = global_menu_items(self.snapshot.as_deref())
+            .get(index)
+            .map(|(_, action)| *action)
+        else {
             return;
         };
-        if action == ClientGlobalMenuAction::WhatsNew
-            && self
-                .snapshot
-                .as_deref()
-                .and_then(|snapshot| snapshot.release_notes.as_ref())
-                .is_none()
-        {
+        if !global_menu_action_enabled(
+            self.snapshot.as_deref(),
+            !self.popup_pending && self.popup_terminal_id.is_none(),
+            action,
+        ) {
             return;
         }
         self.overlay = None;
@@ -104,6 +117,7 @@ impl ClientShellState {
                 self.record_binding(crate::input::KeybindMatch::Action(binding), outcome)
             }
             ClientGlobalMenuAction::WhatsNew => self.open_release_notes(),
+            ClientGlobalMenuAction::Sessions => self.open_session_picker(outcome),
         }
         outcome.repaint = true;
     }

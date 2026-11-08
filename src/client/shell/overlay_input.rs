@@ -451,7 +451,7 @@ impl ClientShellState {
     }
 
     pub(super) fn insert_overlay_text(&mut self, text: &str) -> bool {
-        if self.insert_worktree_overlay_text(text) {
+        if self.insert_session_picker_text(text) || self.insert_worktree_overlay_text(text) {
             return true;
         }
         match self.overlay.as_mut() {
@@ -483,6 +483,9 @@ impl ClientShellState {
     ) {
         use crossterm::event::KeyModifiers;
 
+        if self.route_session_picker_key(key, outcome) {
+            return;
+        }
         if matches!(self.overlay, Some(ClientShellOverlay::Onboarding)) {
             if matches!(
                 key.code,

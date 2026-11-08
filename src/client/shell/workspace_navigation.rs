@@ -78,6 +78,7 @@ impl ClientShellState {
     pub(super) fn navigation_target_valid(&self, target: &WorkspaceNavigationTarget) -> bool {
         self.endpoints.iter().any(|endpoint| {
             endpoint.endpoint_id == target.endpoint_id
+                && !endpoint.session_hidden
                 && endpoint.status == ClientEndpointStatus::Online
                 && endpoint.snapshot_generation == target.generation
                 && endpoint.snapshot.as_deref().is_some_and(|snapshot| {
@@ -102,7 +103,7 @@ impl ClientShellState {
         let empty_collapsed_groups = HashSet::new();
         let mut targets = Vec::new();
         for endpoint in &self.endpoints {
-            if endpoint.status != ClientEndpointStatus::Online {
+            if endpoint.session_hidden || endpoint.status != ClientEndpointStatus::Online {
                 continue;
             }
             let Some(snapshot) = endpoint.snapshot.as_deref() else {
@@ -153,8 +154,9 @@ impl ClientShellState {
             None => 0,
         };
         let target = targets.swap_remove(next);
-        self.collapsed_endpoints.remove(&target.endpoint_id);
-        if self.endpoints.len() == 1 && !mobile {
+        self.collapsed_endpoints
+            .remove(target.endpoint_id.machine_ref());
+        if !self.multi_endpoint_active() && !mobile {
             self.reveal_workspace(&target.workspace_id);
         }
         self.navigate_workspace_id = Some(target);

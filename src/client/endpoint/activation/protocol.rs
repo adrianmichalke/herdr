@@ -128,18 +128,26 @@ pub(super) fn send_surface_activation(
     resize: &crate::protocol::ClientMessage,
     focused: bool,
 ) -> Result<(), String> {
-    if endpoints.send_to(&target.endpoint_id, resize) != EndpointSendOutcome::Sent {
+    if !endpoints.accepts(&target.endpoint_id, target.generation) {
+        return Err("endpoint connection lease expired".into());
+    }
+    if endpoints.send_for_generation(&target.endpoint_id, target.generation, resize)
+        != EndpointSendOutcome::Sent
+    {
         return Err("endpoint resize could not be sent".into());
     }
     let request = surface_interest_request(&target.boot_id, request_id, true)
         .map_err(|error| error.to_string())?;
-    if endpoints.send_to(&target.endpoint_id, &request) != EndpointSendOutcome::Sent {
+    if endpoints.send_for_generation(&target.endpoint_id, target.generation, &request)
+        != EndpointSendOutcome::Sent
+    {
         return Err("endpoint activation could not be sent".into());
     }
     // Inactive endpoints reject focus events. Activate first, then establish the host baseline
     // on the same ordered transport before navigation or presentation can commit.
-    if endpoints.send_to(
+    if endpoints.send_for_generation(
         &target.endpoint_id,
+        target.generation,
         &crate::protocol::ClientMessage::ClientShellFocus { focused },
     ) != EndpointSendOutcome::Sent
     {

@@ -12,6 +12,8 @@ pub(crate) struct ClientEndpointAgentViewProjection {
 pub(crate) struct ClientShellEndpoint {
     pub(crate) endpoint_id: ClientEndpointId,
     pub(crate) label: String,
+    pub(crate) session_name: String,
+    pub(crate) session_hidden: bool,
     pub(crate) status: ClientEndpointStatus,
     pub(crate) snapshot: Option<Box<ClientShellSnapshot>>,
     /// Connection generation that produced `snapshot`. `None` is reserved for local tests.
@@ -23,6 +25,15 @@ pub(crate) struct ClientShellEndpoint {
     pub(crate) agent_view_projection_supported: bool,
     pub(crate) agent_activity_supported: bool,
     pub(crate) methods: Option<HashSet<String>>,
+}
+
+impl ClientShellEndpoint {
+    pub(super) fn recency_id(&self) -> ClientEndpointId {
+        ClientEndpointId::Session {
+            machine: Box::new(self.endpoint_id.machine_id()),
+            name: self.session_name.clone(),
+        }
+    }
 }
 
 pub(super) struct MachineHit {
@@ -45,27 +56,129 @@ pub(crate) enum ClientEndpointFocusTarget {
 }
 
 impl ClientShellState {
+    pub(crate) fn root_remote_target(&self) -> Option<&str> {
+        self.config.root_remote_target.as_deref()
+    }
+
+    pub(crate) fn initial_session_name(&self) -> &str {
+        &self.config.initial_session_name
+    }
+
+    pub(crate) fn visible_endpoint_for_machine(
+        &self,
+        machine: &ClientEndpointId,
+    ) -> Option<&ClientShellEndpoint> {
+        self.endpoints.iter().find(|endpoint| {
+            !endpoint.session_hidden && endpoint.endpoint_id.machine_ref() == machine.machine_ref()
+        })
+    }
+
+    pub(crate) fn stage_session_endpoint(
+        &mut self,
+        machine: &ClientEndpointId,
+        endpoint_id: ClientEndpointId,
+        name: String,
+    ) -> bool {
+        if endpoint_id.machine_ref() != machine.machine_ref()
+            || crate::session::validate_name(&name).is_err()
+            || matches!(&endpoint_id, ClientEndpointId::Session { name: scoped, .. } if scoped != &name)
+            || self
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.endpoint_id == endpoint_id)
+        {
+            return false;
+        }
+        let Some(committed) = self.visible_endpoint_for_machine(machine) else {
+            return false;
+        };
+        let mut candidate = local_endpoint();
+        candidate.label = committed.label.clone();
+        candidate.endpoint_id = endpoint_id;
+        candidate.session_name = name;
+        candidate.session_hidden = true;
+        candidate.status = ClientEndpointStatus::Connecting;
+        candidate.agent_recency = self.agent_recency.ranks(&candidate.recency_id());
+        self.endpoints.push(candidate);
+        true
+    }
+
+    pub(crate) fn endpoint_is_session_candidate(&self, endpoint_id: &ClientEndpointId) -> bool {
+        self.endpoints
+            .iter()
+            .any(|endpoint| &endpoint.endpoint_id == endpoint_id && endpoint.session_hidden)
+    }
+
+    pub(crate) fn commit_session_endpoint(
+        &mut self,
+        target: &ClientEndpointId,
+    ) -> Vec<ClientEndpointId> {
+        if !self
+            .endpoints
+            .iter()
+            .any(|endpoint| &endpoint.endpoint_id == target)
+        {
+            return Vec::new();
+        }
+        let machine = target.machine_id();
+        let mut retired = Vec::new();
+        for endpoint in &mut self.endpoints {
+            if endpoint.endpoint_id.machine_id() == machine {
+                endpoint.session_hidden = &endpoint.endpoint_id != target;
+                if endpoint.session_hidden {
+                    retired.push(endpoint.endpoint_id.clone());
+                }
+            }
+        }
+        retired
+    }
+
+    pub(crate) fn remove_session_endpoint(&mut self, endpoint_id: &ClientEndpointId) {
+        self.retire_endpoint_notifications(endpoint_id);
+        self.clear_machine_diagnostic(endpoint_id);
+        self.endpoints
+            .retain(|endpoint| &endpoint.endpoint_id != endpoint_id);
+    }
+
     pub(crate) fn set_endpoint_catalog(&mut self, profiles: &[SavedSshEndpoint]) {
         let mut next = Vec::with_capacity(profiles.len().saturating_add(1));
         let local = self
             .endpoints
             .iter()
-            .find(|endpoint| endpoint.endpoint_id.is_local())
+            .find(|endpoint| endpoint.endpoint_id.is_local() && !endpoint.session_hidden)
             .cloned()
             .unwrap_or_else(local_endpoint);
         next.push(local);
         for profile in profiles {
-            let endpoint_id = ClientEndpointId::Ssh(profile.id.clone());
+            let machine = ClientEndpointId::Ssh(profile.id.clone());
+            self.agent_recency.qualify_initial(
+                &machine,
+                &profile.session,
+                std::time::Instant::now(),
+            );
             let previous = self
                 .endpoints
                 .iter()
-                .find(|endpoint| endpoint.endpoint_id == endpoint_id)
+                .find(|endpoint| {
+                    !endpoint.session_hidden && endpoint.endpoint_id.machine_id() == machine
+                })
                 .filter(|endpoint| {
                     profile.enabled && endpoint.status != ClientEndpointStatus::Disabled
                 });
+            let endpoint_id = previous.map_or(machine, |endpoint| endpoint.endpoint_id.clone());
+            let session_name = previous.map_or_else(
+                || profile.session.clone(),
+                |endpoint| endpoint.session_name.clone(),
+            );
+            let recency_id = ClientEndpointId::Session {
+                machine: Box::new(endpoint_id.machine_id()),
+                name: session_name.clone(),
+            };
             next.push(ClientShellEndpoint {
                 endpoint_id: endpoint_id.clone(),
                 label: profile.label.clone(),
+                session_name,
+                session_hidden: false,
                 status: previous.map_or(
                     if profile.enabled {
                         ClientEndpointStatus::Connecting
@@ -76,7 +189,7 @@ impl ClientShellState {
                 ),
                 snapshot: previous.and_then(|endpoint| endpoint.snapshot.clone()),
                 snapshot_generation: previous.and_then(|endpoint| endpoint.snapshot_generation),
-                agent_recency: self.agent_recency.ranks(&endpoint_id),
+                agent_recency: self.agent_recency.ranks(&recency_id),
                 agent_presentation: previous
                     .map(|endpoint| endpoint.agent_presentation.clone())
                     .unwrap_or_default(),
@@ -100,20 +213,26 @@ impl ClientShellState {
         }
         self.collapsed_endpoints.retain(|endpoint_id| {
             next.iter()
-                .any(|endpoint| &endpoint.endpoint_id == endpoint_id)
+                .any(|endpoint| endpoint.endpoint_id.machine_id() == endpoint_id.machine_id())
         });
         self.endpoints = next;
         self.agent_recency.retain_endpoints(
             self.endpoints
                 .iter()
-                .map(|endpoint| endpoint.endpoint_id.storage_key()),
+                .filter(|endpoint| endpoint.status != ClientEndpointStatus::Disabled)
+                .map(|endpoint| endpoint.endpoint_id.machine_id().storage_key()),
             std::time::Instant::now(),
         );
     }
 
     pub(crate) fn select_unavailable_local(&mut self) {
+        let local = self
+            .visible_endpoint_for_machine(&ClientEndpointId::Local)
+            .map_or(ClientEndpointId::Local, |endpoint| {
+                endpoint.endpoint_id.clone()
+            });
         self.reset_endpoint_projection();
-        self.active_endpoint_id = ClientEndpointId::Local;
+        self.active_endpoint_id = local;
         self.mode = ClientShellMode::Terminal;
         self.snapshot = None;
         self.graphics.set_scope("local:unavailable");
@@ -257,9 +376,12 @@ impl ClientShellState {
         let switching_endpoint = endpoint_id != &self.active_endpoint_id;
         let agent_scroll = self.agent_scroll;
         if switching_endpoint {
+            self.reset_endpoint_projection();
+            self.snapshot = None;
+            self.active_snapshot_generation = None;
+            self.graphics
+                .set_scope(&format!("{}:switching", endpoint_id.storage_key()));
             self.active_endpoint_id = endpoint_id.clone();
-            self.pane_surface = None;
-            self.pending_pane_surface = None;
         }
         self.apply_active_snapshot(snapshot, generation);
         if switching_endpoint {
@@ -497,7 +619,11 @@ impl ClientShellState {
     }
 
     pub(crate) fn multi_endpoint_active(&self) -> bool {
-        self.endpoints.len() > 1
+        self.endpoints
+            .iter()
+            .filter(|endpoint| !endpoint.session_hidden)
+            .nth(1)
+            .is_some()
     }
 
     #[cfg(test)]
@@ -625,9 +751,10 @@ impl ClientShellState {
                     .agent_activity_supported
                     .then_some(&empty_activity)
             });
+        let recency_id = self.endpoints[index].recency_id();
         self.agent_recency
-            .observe(endpoint_id, &snapshot, activity, std::time::Instant::now());
-        let recency = self.agent_recency.ranks(endpoint_id);
+            .observe(&recency_id, &snapshot, activity, std::time::Instant::now());
+        let recency = self.agent_recency.ranks(&recency_id);
         let endpoint = &mut self.endpoints[index];
         endpoint.agent_recency = recency;
         endpoint.snapshot_generation = generation;
@@ -743,6 +870,8 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
     ClientShellEndpoint {
         endpoint_id: ClientEndpointId::Local,
         label: "Local".into(),
+        session_name: crate::session::DEFAULT_SESSION_NAME.to_owned(),
+        session_hidden: false,
         status: ClientEndpointStatus::Online,
         snapshot: None,
         snapshot_generation: None,

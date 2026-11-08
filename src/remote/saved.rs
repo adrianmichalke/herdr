@@ -1,7 +1,7 @@
 use std::io;
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::time::{Duration, Instant};
@@ -23,6 +23,9 @@ pub(crate) fn connect_saved_ssh(
     session: &str,
     cancelled: Arc<AtomicBool>,
 ) -> io::Result<SavedSshStream> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(super::process::cancelled());
+    }
     let mut ssh = validated_saved_ssh(profile_id, target, session)?;
     ssh.cancelled = Arc::clone(&cancelled);
     ssh.prepare_shared_transport()?;
@@ -31,7 +34,7 @@ pub(crate) fn connect_saved_ssh(
     if cancelled.load(Ordering::Acquire) {
         return Err(super::process::cancelled());
     }
-    let path = saved_bridge_path(profile_id);
+    let path = saved_bridge_path(profile_id, "client");
     let bridge = SshStdioBridge::start(
         target.to_owned(),
         remote_herdr,
@@ -54,6 +57,25 @@ pub(crate) fn connect_saved_ssh(
         stream,
         bridge: SavedSshBridge { _bridge: bridge },
     })
+}
+
+pub(crate) fn list_saved_sessions(
+    profile_id: &str,
+    target: &str,
+    session: &str,
+    cancelled: Arc<AtomicBool>,
+) -> io::Result<Vec<crate::session::SessionInfo>> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(super::process::cancelled());
+    }
+    let mut ssh = validated_saved_ssh(profile_id, target, session)?;
+    ssh.cancelled = Arc::clone(&cancelled);
+    ssh.prepare_shared_transport()?;
+    let result = super::attach::list_remote_sessions(&ssh);
+    if cancelled.load(Ordering::Acquire) {
+        return Err(super::process::cancelled());
+    }
+    result
 }
 
 pub(crate) struct SavedSshApiBridge {
@@ -95,14 +117,7 @@ impl SavedSshApiBridge {
             }
         };
         let command = super::attach::cached_remote_api_command(&metadata, session);
-        let path = crate::platform::remote_bridge_endpoint_path(
-            &format!("herdr-api-ssh-{}-{profile_id}.sock", std::process::id()),
-            &format!(
-                "herdr-api-{}-{}.sock",
-                std::process::id(),
-                &profile_id[..16]
-            ),
-        );
+        let path = saved_bridge_path(profile_id, "api");
         let bridge = SshStdioBridge::start_command(
             target.to_owned(),
             command,
@@ -179,15 +194,19 @@ pub(crate) fn saved_ssh_failure_needs_attention(error: &io::Error) -> bool {
     .any(|needle| message.contains(needle))
 }
 
-fn saved_bridge_path(profile_id: &str) -> PathBuf {
+fn saved_bridge_path(profile_id: &str, kind: &str) -> PathBuf {
+    static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(0);
+    let instance = NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
-    let readable = format!("herdr-ssh-{pid}-{profile_id}.sock");
-    let short = format!("herdr-s-{pid}-{}.sock", &profile_id[..16]);
+    let readable = format!("herdr-{kind}-ssh-{pid}-{instance:x}-{profile_id}.sock");
+    let short = format!("herdr-{kind}-{pid}-{instance:x}-{}.sock", &profile_id[..16]);
     crate::platform::remote_bridge_endpoint_path(&readable, &short)
 }
 
 fn validated_saved_ssh(profile_id: &str, target: &str, session: &str) -> io::Result<RemoteSsh> {
     validate_profile_path_id(profile_id)?;
+    super::validate_remote_target(target)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     crate::session::validate_name(session)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     Ok(RemoteSsh::new_noninteractive(target.to_owned()))
@@ -214,11 +233,77 @@ mod tests {
 
     #[test]
     fn bridge_paths_use_profile_identity_not_target_or_session() {
-        let first = saved_bridge_path("0123456789abcdef0123456789abcdef");
-        let second = saved_bridge_path("fedcba9876543210fedcba9876543210");
+        let first = saved_bridge_path("0123456789abcdef0123456789abcdef", "client");
+        let second = saved_bridge_path("fedcba9876543210fedcba9876543210", "client");
         assert_ne!(first, second);
         assert!(!first.to_string_lossy().contains("example.com"));
         assert!(!first.to_string_lossy().contains("default"));
+    }
+
+    #[test]
+    fn bridge_paths_are_unique_for_concurrent_attachments_to_the_same_profile() {
+        let profile = "0123456789abcdef0123456789abcdef";
+        let paths = (0..32)
+            .flat_map(|_| {
+                [
+                    saved_bridge_path(profile, "client"),
+                    saved_bridge_path(profile, "api"),
+                ]
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(paths.len(), 64);
+        assert!(paths.iter().all(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(&profile[..16])
+        }));
+    }
+
+    #[test]
+    fn saved_session_operations_reject_cancelled_requests_before_ssh_setup() {
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let profile = "0123456789abcdef0123456789abcdef";
+        let error =
+            list_saved_sessions(profile, "unused.invalid", "default", Arc::clone(&cancelled))
+                .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+        let error = connect_saved_ssh(profile, "unused.invalid", "work", cancelled)
+            .err()
+            .expect("cancelled connection");
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+    }
+
+    #[test]
+    fn saved_session_operations_validate_names_targets_and_profile_ids() {
+        for (profile, target, session) in [
+            ("short", "unused.invalid", "default"),
+            ("0123456789abcdef0123456789abcdef", "", "default"),
+            ("0123456789abcdef0123456789abcdef", "-option", "work"),
+            (
+                "0123456789abcdef0123456789abcdef",
+                "unused.invalid",
+                "../other",
+            ),
+        ] {
+            let error =
+                list_saved_sessions(profile, target, session, Arc::new(AtomicBool::new(false)))
+                    .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            let error =
+                connect_saved_ssh(profile, target, session, Arc::new(AtomicBool::new(false)))
+                    .err()
+                    .expect("invalid saved connection target");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        }
+    }
+
+    #[test]
+    fn bootstrap_command_explicitly_selects_default() {
+        assert_eq!(
+            saved_ssh_bootstrap_command("build-host", "default"),
+            "herdr --remote build-host --session default"
+        );
     }
 
     #[test]

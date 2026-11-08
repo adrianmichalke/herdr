@@ -247,6 +247,13 @@ impl ClientShellState {
                 }
                 RawInputEvent::Text(text) => {
                     let text = text.into_string();
+                    if self.insert_session_picker_text(&text)
+                        || matches!(self.overlay, Some(ClientShellOverlay::GlobalMenu(_)))
+                    {
+                        outcome.repaint = true;
+                        self.reconcile_input_source();
+                        continue;
+                    }
                     if matches!(
                         self.overlay,
                         Some(
@@ -280,6 +287,13 @@ impl ClientShellState {
                     }
                 }
                 RawInputEvent::Paste(text) => {
+                    if self.insert_session_picker_text(&text)
+                        || matches!(self.overlay, Some(ClientShellOverlay::GlobalMenu(_)))
+                    {
+                        outcome.repaint = true;
+                        self.reconcile_input_source();
+                        continue;
+                    }
                     if matches!(
                         self.overlay,
                         Some(
@@ -547,6 +561,9 @@ impl ClientShellState {
     }
 
     pub(super) fn modal_paste_target_active(&self) -> bool {
+        if let Some(ClientShellOverlay::SessionPicker(picker)) = self.overlay.as_ref() {
+            return picker.new_name.is_some() && !picker.switching;
+        }
         if self.popup_pending
             || self.popup_input_target().is_some()
             || (self.overlay.is_none()
@@ -627,6 +644,18 @@ impl ClientShellState {
             if key.kind == KeyEventKind::Press {
                 self.route_overlay_key(key, outcome);
             }
+            return None;
+        }
+        if self.route_session_picker_key(key, outcome) {
+            return None;
+        }
+        if matches!(self.overlay, Some(ClientShellOverlay::GlobalMenu(_))) {
+            self.route_overlay_key(key, outcome);
+            return None;
+        }
+        if self.overlay.is_none() && key.code == KeyCode::Menu && key.modifiers.is_empty() {
+            self.toggle_global_menu();
+            outcome.repaint = true;
             return None;
         }
         if let Some(target) = self.popup_input_target() {
@@ -710,6 +739,9 @@ impl ClientShellState {
                     return None;
                 }
                 self.mode = return_mode;
+                if key.code == KeyCode::Char('m') && key.modifiers.is_empty() {
+                    self.toggle_global_menu();
+                }
                 outcome.repaint = true;
                 None
             }
@@ -1100,6 +1132,8 @@ impl ClientShellState {
                 ClientShellOverlay::Onboarding
                     | ClientShellOverlay::ProductAnnouncement(_)
                     | ClientShellOverlay::ReleaseNotes(_)
+                    | ClientShellOverlay::SessionPicker(_)
+                    | ClientShellOverlay::GlobalMenu(_)
             )
         ) || self
             .copy_mode

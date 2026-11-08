@@ -331,6 +331,46 @@ mod tests {
     }
 
     #[test]
+    fn same_machine_sessions_have_separate_command_lanes_and_retirements() {
+        let initial = endpoint();
+        let scoped = initial.with_session("second").unwrap();
+        let mut commands = commands_with_in_flight();
+        commands.lanes.insert(
+            scoped.clone(),
+            EndpointCommandLane {
+                in_flight: Some(InFlightCommand {
+                    generation: 7,
+                    boot_id: "boot-a".into(),
+                    request_id: "request-a".into(),
+                    response: Vec::new(),
+                    sent_at: Instant::now(),
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(commands.retire_lane(&initial), vec!["request-a"]);
+        let response = serde_json::to_vec(&SuccessResponse {
+            id: "request-a".into(),
+            result: ResponseResult::Ok {},
+        })
+        .unwrap();
+        assert!(commands
+            .receive_chunk(&scoped, 1, "boot-a", "request-a", true, response.clone())
+            .unwrap()
+            .is_none());
+        assert!(commands
+            .receive_chunk(&initial, 1, "boot-a", "request-a", true, response.clone())
+            .unwrap()
+            .is_none());
+        let completed = commands
+            .receive_chunk(&scoped, 7, "boot-a", "request-a", true, response)
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.endpoint_id, scoped);
+        assert_eq!(completed.generation, 7);
+    }
+
+    #[test]
     fn chunked_response_completion_is_correlated_and_clears_the_lane() {
         let mut commands = commands_with_in_flight();
         let response = serde_json::to_string(&SuccessResponse {

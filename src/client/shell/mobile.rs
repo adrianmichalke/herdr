@@ -51,6 +51,7 @@ pub(super) fn render_mobile_header(
     buffer: &mut Buffer,
     area: Rect,
     snapshot: &ClientShellSnapshot,
+    session_name: &str,
     config: &ClientShellConfig,
     hits: &mut ShellHitMap,
 ) {
@@ -59,7 +60,7 @@ pub(super) fn render_mobile_header(
     }
     let palette = &config.palette;
     buffer.set_style(area, Style::default().bg(palette.panel_bg));
-    let button_width = MOBILE_BUTTON_WIDTH.min(area.width);
+    let button_width = MOBILE_BUTTON_WIDTH.min(area.width / 2);
     let button = Rect::new(
         area.right().saturating_sub(button_width),
         area.y,
@@ -67,10 +68,37 @@ pub(super) fn render_mobile_header(
         area.height,
     );
     hits.mobile_switch = button;
-    let status_width = button.x.saturating_sub(area.x).saturating_sub(1);
+    let status_width = button
+        .x
+        .saturating_sub(area.x)
+        .saturating_sub(u16::from(area.width > 4));
     let status = Rect::new(area.x, area.y, status_width, area.height);
     render_header_status(buffer, status, snapshot, config);
     render_header_button(buffer, button, snapshot, config);
+    let selector_width = display_width(session_name)
+        .saturating_add(11)
+        .min(status.width);
+    let selector = Rect::new(
+        status.x,
+        status.y + u16::from(status.height > 1),
+        selector_width,
+        1,
+    );
+    super::sessions::render_selector(buffer, selector, session_name, palette, hits);
+    if status.height > 1 {
+        let summary_x = selector.right().saturating_add(1).min(status.right());
+        render_agent_summary(
+            buffer,
+            Rect::new(
+                summary_x,
+                selector.y,
+                status.right().saturating_sub(summary_x),
+                1,
+            ),
+            snapshot,
+            config,
+        );
+    }
 }
 
 fn render_header_status(
@@ -134,14 +162,6 @@ fn render_header_status(
         &tab_status,
         Style::default().fg(palette.overlay1).bg(palette.panel_bg),
     );
-    if area.height > 1 {
-        render_agent_summary(
-            buffer,
-            Rect::new(area.x, area.y + 1, area.width, 1),
-            snapshot,
-            config,
-        );
-    }
 }
 
 fn render_header_button(
@@ -379,22 +399,15 @@ pub(super) fn render_mobile_switcher(
     Clear.render(area, buffer);
     buffer.set_style(area, Style::default().bg(palette.panel_bg));
     hits.mobile_switch = Rect::default();
+    hits.session_selector = Rect::default();
+    let session_name = super::sessions::active_session_name(endpoints, active_endpoint_id);
     if area.height <= 2 {
         *scroll = 0;
-        put_text(
-            buffer,
-            area.x,
-            area.y,
-            area.width,
-            &"─".repeat(usize::from(area.width)),
-            Style::default()
-                .fg(palette.surface_dim)
-                .bg(palette.panel_bg),
-        );
+        super::sessions::render_selector(buffer, area, session_name, palette, hits);
         return;
     }
     let header_height = area.height.min(2);
-    let close_width = MOBILE_BUTTON_WIDTH.min(area.width);
+    let close_width = MOBILE_BUTTON_WIDTH.min(area.width / 2);
     let close = Rect::new(
         area.right().saturating_sub(close_width),
         area.y,
@@ -414,6 +427,13 @@ pub(super) fn render_mobile_switcher(
             .add_modifier(Modifier::BOLD),
     );
     render_close_button(buffer, close, palette);
+    super::sessions::render_selector(
+        buffer,
+        Rect::new(area.x, area.y + 1, close.x.saturating_sub(area.x), 1),
+        session_name,
+        palette,
+        hits,
+    );
     let rule_y = area.y + header_height;
     put_text(
         buffer,
@@ -582,9 +602,14 @@ fn mobile_items(
 ) -> Vec<MobileItem> {
     let palette = &config.palette;
     let mut items = Vec::new();
-    if endpoints.len() > 1 {
+    if endpoints
+        .iter()
+        .filter(|endpoint| !endpoint.session_hidden)
+        .count()
+        > 1
+    {
         items.push(MobileItem::section("machines", palette));
-        for endpoint in endpoints {
+        for endpoint in endpoints.iter().filter(|endpoint| !endpoint.session_hidden) {
             let background = palette.panel_bg;
             let (symbol, state, color) = endpoint_status_presentation(endpoint.status, palette);
             items.push(MobileItem {
@@ -924,7 +949,7 @@ fn mobile_items(
     }
 
     items.push(MobileItem::section("menu", palette));
-    for (index, (label, _)) in super::global_menu::global_menu_items(snapshot)
+    for (index, (label, _)) in super::global_menu::global_menu_items(Some(snapshot))
         .into_iter()
         .enumerate()
     {
@@ -987,6 +1012,7 @@ impl ClientShellState {
                 return true;
             }
             MouseEventKind::Down(MouseButton::Left) => {}
+            MouseEventKind::Down(MouseButton::Right) => return false,
             _ => return true,
         }
 
@@ -1070,7 +1096,7 @@ impl ClientShellState {
             }
             Some(ClientMobileTarget::Menu(index)) => {
                 let actionable = self.snapshot.as_deref().is_some_and(|snapshot| {
-                    super::global_menu::global_menu_items(snapshot)
+                    super::global_menu::global_menu_items(Some(snapshot))
                         .get(index)
                         .is_some_and(|(_, action)| {
                             *action != super::global_menu::ClientGlobalMenuAction::WhatsNew
@@ -1078,7 +1104,12 @@ impl ClientShellState {
                         })
                 });
                 if actionable {
-                    self.mobile_switcher_suspended = true;
+                    self.mobile_switcher_suspended =
+                        !super::global_menu::global_menu_items(self.snapshot.as_deref())
+                            .get(index)
+                            .is_some_and(|(_, action)| {
+                                *action == super::global_menu::ClientGlobalMenuAction::Sessions
+                            });
                     self.activate_global_menu_item(index, outcome);
                 }
             }

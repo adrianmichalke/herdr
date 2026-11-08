@@ -36,9 +36,7 @@ impl ClientShellState {
             .remote_collapsed_groups
             .iter()
             .filter_map(|(endpoint_id, groups)| {
-                let ClientEndpointId::Ssh(profile_id) = endpoint_id else {
-                    return None;
-                };
+                let profile_id = endpoint_id.ssh_profile_id()?;
                 let mut collapsed_groups = groups.iter().cloned().collect::<Vec<_>>();
                 collapsed_groups.sort();
                 (!collapsed_groups.is_empty()).then(|| preferences::ClientRemoteCollapsedGroups {
@@ -159,6 +157,9 @@ impl ClientShellConfig {
             preferences: preferences::ClientChromePreferences::default(),
             startup_config_diagnostic: None,
             startup_onboarding: false,
+            initial_session_name: crate::session::active_name()
+                .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_owned()),
+            root_remote_target: None,
         }
     }
 
@@ -204,15 +205,19 @@ impl ClientShellConfig {
     }
 
     pub(crate) fn with_endpoint_preferences(
-        self,
+        mut self,
         socket_path: &std::path::Path,
         remote_identity: Option<&str>,
     ) -> Self {
         let identity = remote_identity
             .and_then(|value| serde_json::from_str::<(String, String)>(value).ok())
-            .filter(|(target, session)| !target.is_empty() && !session.is_empty());
+            .filter(|(target, session)| {
+                !target.is_empty() && crate::session::validate_name(session).is_ok()
+            });
         match identity {
             Some((target, session)) => {
+                self.initial_session_name = session.clone();
+                self.root_remote_target = Some(target.clone());
                 self.with_preferences_path(preferences::path_for_remote_endpoint(&target, &session))
             }
             None => self.with_local_endpoint(socket_path),

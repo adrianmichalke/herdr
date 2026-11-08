@@ -159,6 +159,7 @@ pub(crate) enum ActivationBeginError {
 pub(crate) struct PendingEndpointActivation {
     pub(super) source: EndpointLease,
     pub(super) source_available: bool,
+    pub(super) session_handoff: bool,
     pub(super) target: EndpointLease,
     pub(super) focus: Option<crate::client::shell::ClientEndpointFocusTarget>,
     pub(super) host_focused: bool,

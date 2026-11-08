@@ -10,6 +10,7 @@ pub(super) fn dispatch_client_shell_actions(
 ) -> Result<(Vec<crossterm::event::MouseEvent>, bool), ClientError> {
     let mut replay_mouse = Vec::new();
     let mut repaint = false;
+    let mut session_actions = Vec::new();
     for action in actions {
         match action {
             shell::ClientShellAction::Endpoint {
@@ -50,6 +51,31 @@ pub(super) fn dispatch_client_shell_actions(
                     force: false,
                 });
             }
+            shell::ClientShellAction::SessionList {
+                machine,
+                request_id,
+            } => {
+                session_actions.push(session_switch::SessionAction::List {
+                    machine,
+                    request_id,
+                });
+            }
+            shell::ClientShellAction::SessionOpen {
+                machine,
+                request_id,
+                session,
+                create,
+            } => {
+                session_actions.push(session_switch::SessionAction::Open {
+                    machine,
+                    request_id,
+                    session,
+                    create,
+                });
+            }
+            shell::ClientShellAction::SessionCancel { request_id } => {
+                session_actions.push(session_switch::SessionAction::Cancel { request_id });
+            }
             shell::ClientShellAction::OpenSafeWebUrl(url) => {
                 if crate::app::actions::safe_web_url(&url).is_some() {
                     match crate::platform::open_url(&url) {
@@ -68,6 +94,9 @@ pub(super) fn dispatch_client_shell_actions(
             }
         }
     }
+    if !session_actions.is_empty() {
+        *scheduled_activation = Some(ClientLoopEvent::SessionActions(session_actions));
+    }
     // A source-off-first handoff leaves the registry's committed identity pointing at a
     // deliberately surface-inactive source. Do not drain its retained queue into a server that
     // must reject it; completion below resumes the committed owner's lane.
@@ -81,6 +110,51 @@ pub(super) fn dispatch_client_shell_actions(
         }
     }
     Ok((replay_mouse, repaint))
+}
+
+pub(super) fn install_endpoint_connection(
+    state: &mut ClientState,
+    endpoints: &mut endpoint::EndpointRegistry,
+    endpoint_id: endpoint::ClientEndpointId,
+    generation: u64,
+    reader: LocalStream,
+    writer: endpoint::NativeEndpointTransport,
+    negotiation: endpoint::EndpointNegotiation,
+    event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
+) {
+    let surface_decoder = negotiated_surface_decoder(&negotiation);
+    let frame = state.shell.as_mut().and_then(|shell| {
+        shell.set_endpoint_methods_for(&endpoint_id, Some(negotiation.methods()));
+        shell.set_endpoint_agent_activity_supported(
+            &endpoint_id,
+            negotiation.supports_capability(crate::protocol::endpoint::AGENT_ACTIVITY_CAPABILITY),
+        );
+        shell.set_endpoint_agent_view_projection_supported(
+            &endpoint_id,
+            negotiation
+                .supports_capability(crate::protocol::endpoint::AGENT_VIEW_PROJECTION_CAPABILITY),
+        );
+        shell.compose(state.reported_size.0, state.reported_size.1)
+    });
+    let reader_quit = writer.stop_handle();
+    #[cfg(unix)]
+    state.start_endpoint_graphics_generation(&endpoint_id, generation);
+    endpoints.insert(endpoint_id.clone(), writer, generation, negotiation, false);
+    if let Some(frame) = frame {
+        state.present_frame(frame);
+    }
+    let reader_tx = event_tx.clone();
+    std::thread::spawn(move || {
+        server_reader_thread(
+            reader,
+            reader_tx,
+            &reader_quit,
+            MAX_GRAPHICS_FRAME_SIZE,
+            endpoint_id,
+            generation,
+            surface_decoder,
+        );
+    });
 }
 
 pub(super) fn client_shell_resize_message(
@@ -164,7 +238,7 @@ pub(super) fn apply_client_shell_input_source_changes(
     }
 }
 
-fn install_pending_activation(
+pub(super) fn install_pending_activation(
     state: &mut ClientState,
     endpoint_commands: &mut endpoint_commands::EndpointCommands,
     pending: &mut Option<endpoint::PendingEndpointActivation>,
@@ -189,26 +263,23 @@ fn install_pending_activation(
 fn local_activation_metadata_ready(
     state: &ClientState,
     endpoints: &endpoint::EndpointRegistry,
+    endpoint_id: &endpoint::ClientEndpointId,
 ) -> bool {
-    endpoints
-        .connection(&endpoint::ClientEndpointId::Local)
-        .is_some_and(|connection| {
-            state.shell.as_ref().is_some_and(|shell| {
-                shell
-                    .endpoint_snapshot_identity(
-                        &endpoint::ClientEndpointId::Local,
-                        connection.generation,
-                    )
-                    .is_some()
-            })
+    endpoints.connection(endpoint_id).is_some_and(|connection| {
+        state.shell.as_ref().is_some_and(|shell| {
+            shell
+                .endpoint_snapshot_identity(endpoint_id, connection.generation)
+                .is_some()
         })
+    })
 }
 
 pub(super) fn take_ready_local_activation(
     state: &mut ClientState,
     endpoints: &endpoint::EndpointRegistry,
 ) -> Option<ClientLoopEvent> {
-    if !local_activation_metadata_ready(state, endpoints) {
+    let endpoint_id = &state.deferred_local_activation.as_ref()?.endpoint_id;
+    if !local_activation_metadata_ready(state, endpoints, endpoint_id) {
         return None;
     }
     state
@@ -243,7 +314,7 @@ pub(super) fn begin_endpoint_activation(
         return Ok(());
     }
     state.deferred_local_activation = None;
-    if endpoint_id.is_local() && !local_activation_metadata_ready(state, endpoints) {
+    if endpoint_id.is_local() && !local_activation_metadata_ready(state, endpoints, &endpoint_id) {
         state.deferred_local_activation = Some(endpoint::EndpointActivationIntent {
             endpoint_id,
             target,
@@ -256,9 +327,9 @@ pub(super) fn begin_endpoint_activation(
         return Ok(());
     }
     let replace_pending = endpoint_id.is_local()
-        && pending
-            .as_ref()
-            .is_some_and(|activation| !activation.can_retarget(&endpoint_id));
+        && pending.as_ref().is_some_and(|activation| {
+            !activation.is_session_handoff() && !activation.can_retarget(&endpoint_id)
+        });
     if !replace_pending {
         if let Some(activation) = pending.as_mut() {
             if activation.can_retarget(&endpoint_id) {
@@ -413,6 +484,30 @@ pub(super) fn complete_endpoint_activation(
     ) {
         // The coherent target frame can replace the frozen source now, but the registry keeps
         // pane input disabled until a second projection epoch has replayed host modes/effects.
+        let resize = state.shell.as_ref().and_then(|shell| {
+            pending
+                .as_ref()
+                .filter(|activation| {
+                    activation.geometry()
+                        != shell.surface_size(state.reported_size.0, state.reported_size.1)
+                })
+                .map(|_| {
+                    client_shell_resize_message(
+                        shell,
+                        state.reported_size.0,
+                        state.reported_size.1,
+                        state.reported_cell_size.0,
+                        state.reported_cell_size.1,
+                        state.pixel_mouse_available(),
+                    )
+                })
+        });
+        if let (Some(resize), Some(activation)) = (resize, pending.as_mut()) {
+            if let Err(error) = activation.update_resize(resize, endpoints) {
+                rollback_endpoint_activation(state, endpoints, pending, error, false);
+                return Ok(None);
+            }
+        }
         state.unfreeze_presentation();
         let (cleanup, frame) = {
             let shell = state.shell.as_mut().expect("checked client shell");
@@ -431,15 +526,29 @@ pub(super) fn complete_endpoint_activation(
         return Ok(None);
     }
 
-    let _ = pending.take();
+    if let Some(activation) = pending.take() {
+        if activation.is_session_handoff() {
+            let result = match &completion {
+                endpoint::ActivationCompletion::Activated => Ok(()),
+                endpoint::ActivationCompletion::RestoredSource { error, .. } => Err(error.clone()),
+                _ => unreachable!(),
+            };
+            state.activation_completion = Some((
+                activation.target().clone(),
+                activation.target_generation(),
+                result,
+            ));
+        }
+    }
     endpoints.unfreeze_input();
+    let session_completion = state.activation_completion.is_some();
     let successor = match completion {
         endpoint::ActivationCompletion::RestoredSource {
             error,
             successor: next,
             ..
         } => {
-            if next.is_none() {
+            if next.is_none() && !session_completion {
                 if let Some(shell) = state.shell.as_mut() {
                     shell.receive_endpoint_unavailable(error);
                 }
@@ -551,6 +660,13 @@ pub(super) fn rollback_endpoint_activation(
     match activation.rollback(endpoints, error.clone(), source_release_rejected) {
         endpoint::ActivationRollback::Pending => state.freeze_presentation(),
         endpoint::ActivationRollback::Unavailable(message) => {
+            if activation.is_session_handoff() {
+                state.activation_completion = Some((
+                    activation.target().clone(),
+                    activation.target_generation(),
+                    Err(message.clone()),
+                ));
+            }
             *pending = None;
             // No endpoint has been proven safe to present. Keep pane input frozen, but render
             // the client-owned unavailable chrome rather than silently swallowing the error.

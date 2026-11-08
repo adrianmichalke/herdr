@@ -14,6 +14,16 @@ Herdr uses several state paths for different situations.
 | Update without `--handoff` | Compatible servers keep running; restart-required servers may need stop/restart | Yes after restart | Only with pane screen history | Only with native agent session restore |
 | Update with `--handoff` | Best effort for supported running servers | Yes | Yes, from the live terminal if handoff succeeds | Yes, because the process keeps running if handoff succeeds |
 
+## Switch sessions in the app
+
+Use **Session: <name> ▾** above the spaces list to open the session picker for the selected machine. It lists the default and named sessions, their running/stopped status, and the current session. The control is also available in compact layouts. For keyboard access, use the Menu key or the unbound `ctrl+b m` fallback to open the global menu, then choose **sessions**. Custom prefix bindings take precedence.
+
+Choose a running session to attach to it, or a stopped session to start it using normal restore settings. **New session** asks for a valid, unused name and creates the session on the selected machine. For an offline saved SSH machine, right-click its machine row and choose **Sessions...**, including in the compact machine switcher.
+
+Switching changes only this UI client's attachment. It does not stop the previous session or its panes and agents. The source remains usable while the destination is prepared; cancellation or a failed connection leaves the source attached and shows an error. Escape leaves the name form first, then closes the picker. Selected-session overrides stay in the client and do not rewrite the saved machine's configured session.
+
+SSH session discovery and startup use existing noninteractive connection rules. The picker does not install or update Herdr, prompt for credentials, rename/delete sessions, or move spaces between sessions. Resolve any SSH authentication or installation problem through the existing machine setup workflow first.
+
 ## Live persistence
 
 Normal detach keeps the Herdr server running. Panes, shells, agents, servers, tests, and command processes keep running inside that server.

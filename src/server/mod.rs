@@ -1,5 +1,6 @@
 mod alt_screen_read;
 pub mod autodetect;
+pub use autodetect::ensure_session_server;
 #[cfg(unix)]
 pub(crate) mod client_accept;
 pub(crate) mod client_commands;

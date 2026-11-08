@@ -13,7 +13,7 @@ fn restore_mode_bar(
     if frame
         .cursor
         .as_ref()
-        .is_some_and(|cursor| cursor.y == bar.y)
+        .is_some_and(|cursor| contains(bar, (cursor.x, cursor.y)))
     {
         frame.cursor = None;
     }
@@ -33,8 +33,18 @@ impl ClientShellState {
         let sidebar = if layout.sidebar.width > 0 {
             layout.sidebar
         } else {
-            Rect::new(0, 1, cols, rows.saturating_sub(2))
+            let top = u16::from(rows > 1);
+            Rect::new(0, top, cols, rows.saturating_sub(top + u16::from(rows > 2)))
         };
+        render::render_sidebar_background(&mut buffer, sidebar, &self.config.palette);
+        let sidebar = sessions::render_sidebar_selector(
+            &mut buffer,
+            sidebar,
+            &self.endpoints,
+            &self.active_endpoint_id,
+            &self.config.palette,
+            &mut self.hits,
+        );
         let valid_navigation_target = self.mode == ClientShellMode::Navigate
             && self
                 .navigate_workspace_id
@@ -48,7 +58,7 @@ impl ClientShellState {
             });
         // A resize invalidates pane geometry, not the healthy Local workspace chrome.
         let local_snapshot = self.snapshot.as_deref().filter(|_| {
-            self.endpoints.len() == 1
+            !self.multi_endpoint_active()
                 && !self.sidebar_collapsed
                 && layout.sidebar.width > 0
                 && self.endpoint_status(&self.active_endpoint_id)
@@ -98,7 +108,9 @@ impl ClientShellState {
             );
         }
         if !self.config.mouse_capture {
+            let session_selector = self.hits.session_selector;
             self.hits = ShellHitMap::default();
+            self.hits.session_selector = session_selector;
         }
         let message = self.endpoint_error.clone().unwrap_or_else(|| {
             let status = self
@@ -144,7 +156,47 @@ impl ClientShellState {
                 &self.config.palette,
             );
         }
-        FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[])
+        if rows <= 3 {
+            sessions::render_selector(
+                &mut buffer,
+                self.hits.session_selector,
+                sessions::active_session_name(&self.endpoints, &self.active_endpoint_id),
+                &self.config.palette,
+                &mut self.hits,
+            );
+        }
+        let mut cursor = None;
+        if let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.as_ref() {
+            if let Some(rendered) =
+                render::render_context_menu(&mut buffer, menu, &self.config.palette)
+            {
+                self.hits.context_menu_rows = rendered.menu_rows;
+            }
+        } else if let Some(ClientShellOverlay::SessionPicker(picker)) = self.overlay.as_ref() {
+            if let Some(rendered) =
+                render::render_session_picker_overlay(&mut buffer, picker, &self.config.palette)
+            {
+                self.hits.overlay_primary = rendered.primary;
+                self.hits.overlay_clear = rendered.clear;
+                self.hits.overlay_cancel = rendered.cancel;
+                self.hits.navigator_popup = rendered.navigator_popup;
+                self.hits.worktree_search = rendered.worktree_search;
+                self.hits.worktree_rows = rendered.worktree_rows;
+                cursor = rendered.cursor;
+            }
+        } else if let Some(ClientShellOverlay::GlobalMenu(menu)) = self.overlay.as_ref() {
+            if let Some(rendered) = render::render_global_menu(
+                &mut buffer,
+                self.hits.global_launcher,
+                menu,
+                self.snapshot.as_deref(),
+                !self.popup_pending && self.popup_terminal_id.is_none(),
+                &self.config.palette,
+            ) {
+                self.hits.global_menu_rows = rendered.menu_rows;
+            }
+        }
+        FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &[])
     }
 
     pub(crate) fn compose(
@@ -332,6 +384,15 @@ impl ClientShellState {
                 &self.config.palette,
             )
         };
+        if layout.sidebar.is_empty() && layout.mobile_header.is_empty() {
+            sessions::render_selector(
+                &mut buffer,
+                self.hits.session_selector,
+                sessions::active_session_name(&self.endpoints, &self.active_endpoint_id),
+                &self.config.palette,
+                &mut self.hits,
+            );
+        }
         if mode_bar == Some(layout.tab_bar) {
             self.hits.tabs.clear();
             self.hits.new_tab = Rect::default();
@@ -339,6 +400,13 @@ impl ClientShellState {
             self.hits.tab_scroll_right = Rect::default();
         }
         let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[]);
+        let compact_selector = (layout.sidebar.is_empty() && layout.mobile_header.is_empty())
+            .then_some(self.hits.session_selector)
+            .filter(|rect| !rect.is_empty());
+        let compact_selector_cells = compact_selector.map(|rect| {
+            let start = usize::from(rect.y) * usize::from(frame.width) + usize::from(rect.x);
+            frame.cells[start..start + usize::from(rect.width)].to_vec()
+        });
         let mode_bar_cells = mode_bar.map(|bar| {
             let start = usize::from(bar.y) * usize::from(frame.width) + usize::from(bar.x);
             frame.cells[start..start + usize::from(bar.width)].to_vec()
@@ -456,7 +524,9 @@ impl ClientShellState {
         let active_lifecycle = self
             .endpoints
             .iter()
-            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .find(|endpoint| {
+                !endpoint.session_hidden && endpoint.endpoint_id == self.active_endpoint_id
+            })
             .filter(|endpoint| endpoint.status != ClientEndpointStatus::Online)
             .map(|endpoint| (endpoint.label.clone(), endpoint.status));
         if has_config_diagnostic
@@ -642,6 +712,14 @@ impl ClientShellState {
         if let Some(bar) = mode_bar {
             occlusion.cover(bar);
         }
+        restore_mode_bar(
+            &mut frame,
+            compact_selector,
+            compact_selector_cells.as_deref(),
+        );
+        if let Some(selector) = compact_selector {
+            occlusion.cover(selector);
+        }
         if let Some(overlay) = self.overlay.as_ref() {
             let mut composed = frame.to_ratatui_buffer()?;
             let cursor = if let ClientShellOverlay::ContextMenu(menu) = overlay {
@@ -655,7 +733,8 @@ impl ClientShellState {
                     &mut composed,
                     self.hits.global_launcher,
                     menu,
-                    snapshot,
+                    Some(snapshot),
+                    !self.popup_pending && self.popup_terminal_id.is_none(),
                     &self.config.palette,
                 )?;
                 occlusion.cover(rendered.area);
@@ -715,7 +794,9 @@ impl ClientShellState {
                 .min(u16::try_from(self.hits.release_notes_max_scroll).unwrap_or(u16::MAX));
         }
         if self.endpoint_status(&self.active_endpoint_id) != Some(ClientEndpointStatus::Online) {
-            frame.cursor = None;
+            if !matches!(self.overlay, Some(ClientShellOverlay::SessionPicker(_))) {
+                frame.cursor = None;
+            }
             self.hits.panes.clear();
             self.hits.pane_splits.clear();
             self.hits.popup = None;

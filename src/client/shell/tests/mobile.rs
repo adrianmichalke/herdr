@@ -668,7 +668,8 @@ fn mobile_switcher_scroll_close_and_width_transition_clear_mobile_hits() {
 
     state.mode = ClientShellMode::Navigate;
     let short = state.compose(44, 2).expect("short mobile switcher");
-    assert_eq!(short.cells[0].symbol, "─");
+    assert!(!state.hits.session_selector.is_empty());
+    assert_eq!(short.cells[0].symbol, "S");
     assert!(state.hits.mobile_close.is_empty());
     assert!(state.hits.mobile_targets.is_empty());
 }

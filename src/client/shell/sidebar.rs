@@ -50,6 +50,7 @@ pub(crate) fn render_collapsed_sidebar(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     recency: Option<&HashMap<String, u64>>,
+    active_endpoint_id: &ClientEndpointId,
     selected_workspace_id: Option<&str>,
     hits: &mut ShellHitMap,
 ) {
@@ -104,7 +105,7 @@ pub(crate) fn render_collapsed_sidebar(
         );
         hits.workspaces.push(WorkspaceHit {
             rect,
-            endpoint_id: ClientEndpointId::Local,
+            endpoint_id: active_endpoint_id.clone(),
             workspace_id: workspace.workspace_id.clone(),
             indented: false,
             group_toggle: None,
@@ -346,7 +347,7 @@ pub(crate) fn render_sidebar(
         );
         hits.workspaces.push(WorkspaceHit {
             rect,
-            endpoint_id: ClientEndpointId::Local,
+            endpoint_id: state.active_endpoint_id.clone(),
             workspace_id: workspace.workspace_id.clone(),
             indented: entry.indented,
             group_toggle,
@@ -440,7 +441,9 @@ pub(crate) fn render_sidebar(
         state
             .endpoints
             .iter()
-            .find(|endpoint| endpoint.endpoint_id == *state.active_endpoint_id)
+            .find(|endpoint| {
+                !endpoint.session_hidden && endpoint.endpoint_id == *state.active_endpoint_id
+            })
             .map(|endpoint| &endpoint.agent_recency),
         state.agent_scroll,
         hits,

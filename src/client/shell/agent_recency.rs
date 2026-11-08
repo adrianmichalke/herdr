@@ -63,6 +63,27 @@ impl AgentRecencyCache {
         }
     }
 
+    pub(super) fn qualify_initial(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        name: &str,
+        now: Instant,
+    ) {
+        if matches!(endpoint_id, ClientEndpointId::Session { .. }) {
+            return;
+        }
+        let Ok(scoped) = endpoint_id.with_session(name) else {
+            return;
+        };
+        if let Some(records) = self.saved.endpoints.remove(&endpoint_id.storage_key()) {
+            self.saved
+                .endpoints
+                .entry(scoped.storage_key())
+                .or_insert(records);
+            self.mark_dirty(now);
+        }
+    }
+
     pub(super) fn ranks(&self, endpoint_id: &ClientEndpointId) -> HashMap<String, u64> {
         self.saved
             .endpoints
@@ -161,9 +182,14 @@ impl AgentRecencyCache {
     ) {
         let endpoints = endpoints.collect::<HashSet<_>>();
         let previous_len = self.saved.endpoints.len();
-        self.saved
-            .endpoints
-            .retain(|endpoint_id, _| endpoints.contains(endpoint_id));
+        self.saved.endpoints.retain(|endpoint_id, _| {
+            endpoints.iter().any(|machine| {
+                endpoint_id == machine
+                    || endpoint_id
+                        .strip_prefix(machine)
+                        .is_some_and(|suffix| suffix.starts_with(":session:"))
+            })
+        });
         if self.saved.endpoints.len() != previous_len {
             self.mark_dirty(now);
         }

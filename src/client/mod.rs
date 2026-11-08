@@ -31,6 +31,7 @@ mod image_files;
 mod input;
 mod loop_config;
 mod notifications;
+mod session_switch;
 mod shell;
 mod shell_runtime;
 mod startup;
@@ -244,8 +245,8 @@ fn run_client_with_mode(
 
     let initial_stream = match crate::ipc::connect_local_stream(&socket_path) {
         Ok(stream) => Some(stream),
-        Err(error) if federated => {
-            warn!(%error, "Local is unavailable; keeping saved machines available");
+        Err(error) if client_rendered_shell => {
+            warn!(%error, "Local is unavailable; keeping the session picker available");
             None
         }
         Err(error) => {
@@ -325,8 +326,8 @@ fn run_client_with_mode(
         .transpose();
     let initial = match initial {
         Ok(initial) => initial,
-        Err(error) if federated => {
-            warn!(%error, "Local handshake failed; keeping saved machines available");
+        Err(error) if client_rendered_shell => {
+            warn!(%error, "Local handshake failed; keeping the session picker available");
             None
         }
         Err(error) => return Err(error),
@@ -489,11 +490,11 @@ async fn run_client_loop(
         repaint_pending: false,
         presentation_frozen: false,
         deferred_local_activation: None,
+        activation_completion: None,
         draw_host_cursor,
         detached_process_children: Vec::new(),
         shell: config.shell_config.map(shell::ClientShellState::new),
     };
-    let mut federated = endpoint_catalog.has_enabled_ssh();
     if let Some(shell) = state.shell.as_mut() {
         shell.set_host_reports_key_releases(config.host_escape_disambiguation_active);
         shell.set_host_erase_byte(crate::platform::terminal_erase_byte());
@@ -653,7 +654,7 @@ async fn run_client_loop(
     };
     let mut supervisors =
         endpoint::EndpointSupervisors::new(&endpoint_catalog.ssh, std::time::Instant::now());
-    if federated {
+    if state.shell.is_some() {
         supervisors.add_local(
             client_socket_path(),
             write_stream
@@ -675,6 +676,7 @@ async fn run_client_loop(
     let mut pending_activation: Option<endpoint::PendingEndpointActivation> = None;
     let mut scheduled_activation = None;
     let mut pending_catalog: Option<Result<Vec<endpoint::SavedSshEndpoint>, String>> = None;
+    let mut session_switch = session_switch::SessionSwitchCoordinator::default();
     if state.shell.is_some() && !is_remote_client && state.attach_escape.is_none() {
         catalog_reload::watch_profiles(event_tx.clone(), should_quit.clone());
     }
@@ -691,33 +693,37 @@ async fn run_client_loop(
     #[cfg(windows)]
     let mut stdin_open = true;
     while !should_quit.load(Ordering::Acquire) {
-        if pending_activation.is_none() {
+        if let Some(options) = session_switch::connect_options(&state, config.endpoint_keybindings)
+        {
+            session_switch.drive(&mut session_switch::SessionSwitchContext {
+                state: &mut state,
+                endpoints: &mut write_stream,
+                commands: &mut endpoint_commands,
+                supervisors: &mut supervisors,
+                catalog: &mut endpoint_catalog,
+                activation: &mut pending_activation,
+                next_surface_serial: &mut next_surface_serial,
+                event_tx: &event_tx,
+                options,
+            })?;
+        }
+        if pending_activation.is_none() && !session_switch.busy() {
             if let Some(reload) = pending_catalog.take() {
                 match reload {
                     Ok(profiles) => {
                         let now = std::time::Instant::now();
-                        if !federated && profiles.iter().any(|profile| profile.enabled) {
-                            // Keep Local recovery once enabled, even after removing the last SSH profile.
-                            federated = true;
-                            supervisors.add_local(
-                                client_socket_path(),
-                                write_stream
-                                    .connection(&endpoint::ClientEndpointId::Local)
-                                    .map(|connection| connection.generation),
-                                now,
-                            );
-                            if write_stream
+                        if profiles.iter().any(|profile| profile.enabled)
+                            && write_stream
                                 .connection(&endpoint::ClientEndpointId::Local)
                                 .is_some_and(|connection| {
                                     !connection.negotiation.supports_surface_interest()
                                 })
-                            {
-                                if let Some(shell) = state.shell.as_mut() {
-                                    shell.receive_endpoint_unavailable(
-                                        "Update the Local server before switching between machines"
-                                            .into(),
-                                    );
-                                }
+                        {
+                            if let Some(shell) = state.shell.as_mut() {
+                                shell.receive_endpoint_unavailable(
+                                    "Update the Local server before switching between machines"
+                                        .into(),
+                                );
                             }
                         }
                         let active_removed = catalog_reload::apply_profiles(
@@ -736,16 +742,25 @@ async fn run_client_loop(
                                 &host_sgr_pixels_active,
                             );
                             scheduled_activation = None;
-                            if state.shell.as_ref().is_some_and(|shell| {
-                                shell.endpoint_projection_available(
-                                    &endpoint::ClientEndpointId::Local,
-                                )
-                            }) && write_stream
-                                .connection(&endpoint::ClientEndpointId::Local)
-                                .is_some()
+                            let local = state
+                                .shell
+                                .as_ref()
+                                .and_then(|shell| {
+                                    shell.visible_endpoint_for_machine(
+                                        &endpoint::ClientEndpointId::Local,
+                                    )
+                                })
+                                .map_or(endpoint::ClientEndpointId::Local, |endpoint| {
+                                    endpoint.endpoint_id.clone()
+                                });
+                            if state
+                                .shell
+                                .as_ref()
+                                .is_some_and(|shell| shell.endpoint_projection_available(&local))
+                                && write_stream.connection(&local).is_some()
                             {
                                 scheduled_activation = Some(ClientLoopEvent::ActivateEndpoint {
-                                    endpoint_id: endpoint::ClientEndpointId::Local,
+                                    endpoint_id: local,
                                     target: None,
                                     force: true,
                                 });
@@ -859,7 +874,40 @@ async fn run_client_loop(
                     write_stream.resume_health(now);
                 }
             }
-            ClientLoopEvent::EndpointCatalog(reload) => pending_catalog = Some(reload),
+            event @ (ClientLoopEvent::EndpointCatalog(_)
+            | ClientLoopEvent::SessionActions(_)
+            | ClientLoopEvent::SessionSwitch(_)) => {
+                if let Some(options) =
+                    session_switch::connect_options(&state, config.endpoint_keybindings)
+                {
+                    let mut context = session_switch::SessionSwitchContext {
+                        state: &mut state,
+                        endpoints: &mut write_stream,
+                        commands: &mut endpoint_commands,
+                        supervisors: &mut supervisors,
+                        catalog: &mut endpoint_catalog,
+                        activation: &mut pending_activation,
+                        next_surface_serial: &mut next_surface_serial,
+                        event_tx: &event_tx,
+                        options,
+                    };
+                    match event {
+                        ClientLoopEvent::EndpointCatalog(reload) => {
+                            if let Ok(profiles) = &reload {
+                                session_switch.catalog_changed(profiles, &mut context);
+                            }
+                            pending_catalog = Some(reload);
+                        }
+                        ClientLoopEvent::SessionActions(actions) => {
+                            session_switch.actions(actions, &mut context)?
+                        }
+                        ClientLoopEvent::SessionSwitch(event) => {
+                            session_switch.receive(event, &mut context)?
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
             #[cfg(unix)]
             ClientLoopEvent::StdinInput(data) => {
                 let image_bridge_active = endpoint_accepts_local_images(
@@ -1395,49 +1443,16 @@ async fn run_client_loop(
                     ) {
                         continue;
                     }
-                    let surface_decoder = negotiated_surface_decoder(&negotiation);
-                    let agent_view_projection_supported = negotiation.supports_capability(
-                        crate::protocol::endpoint::AGENT_VIEW_PROJECTION_CAPABILITY,
-                    );
-                    let agent_activity_supported = negotiation
-                        .supports_capability(crate::protocol::endpoint::AGENT_ACTIVITY_CAPABILITY);
-                    let frame = state.shell.as_mut().and_then(|shell| {
-                        shell.set_endpoint_methods_for(&endpoint_id, Some(negotiation.methods()));
-                        shell.set_endpoint_agent_activity_supported(
-                            &endpoint_id,
-                            agent_activity_supported,
-                        );
-                        shell.set_endpoint_agent_view_projection_supported(
-                            &endpoint_id,
-                            agent_view_projection_supported,
-                        );
-                        shell.compose(state.reported_size.0, state.reported_size.1)
-                    });
-                    let reader_quit = writer.stop_handle();
-                    #[cfg(unix)]
-                    state.start_endpoint_graphics_generation(&endpoint_id, generation);
-                    write_stream.insert(
-                        endpoint_id.clone(),
-                        writer,
+                    install_endpoint_connection(
+                        &mut state,
+                        &mut write_stream,
+                        endpoint_id,
                         generation,
+                        reader,
+                        writer,
                         negotiation,
-                        false,
+                        &event_tx,
                     );
-                    if let Some(frame) = frame {
-                        state.present_frame(frame);
-                    }
-                    let reader_tx = event_tx.clone();
-                    std::thread::spawn(move || {
-                        server_reader_thread(
-                            reader,
-                            reader_tx,
-                            &reader_quit,
-                            MAX_GRAPHICS_FRAME_SIZE,
-                            endpoint_id,
-                            generation,
-                            surface_decoder,
-                        );
-                    });
                 }
             },
             ClientLoopEvent::ActivateEndpoint {
@@ -1445,6 +1460,28 @@ async fn run_client_loop(
                 target,
                 force,
             } => {
+                if let Some(options) =
+                    session_switch::connect_options(&state, config.endpoint_keybindings)
+                {
+                    session_switch.cancel_for_navigation(
+                        &mut session_switch::SessionSwitchContext {
+                            state: &mut state,
+                            endpoints: &mut write_stream,
+                            commands: &mut endpoint_commands,
+                            supervisors: &mut supervisors,
+                            catalog: &mut endpoint_catalog,
+                            activation: &mut pending_activation,
+                            next_surface_serial: &mut next_surface_serial,
+                            event_tx: &event_tx,
+                            options,
+                        },
+                    );
+                }
+                let endpoint_id = state
+                    .shell
+                    .as_ref()
+                    .and_then(|shell| shell.visible_endpoint_for_machine(&endpoint_id))
+                    .map_or(endpoint_id.clone(), |endpoint| endpoint.endpoint_id.clone());
                 if !endpoint_catalog.select_endpoint(&endpoint_id) {
                     continue;
                 }
@@ -1538,7 +1575,7 @@ async fn run_client_loop(
                 match *message {
                     ServerMessage::ClientShellSnapshot(_) => {
                         let message = "server sent an unnegotiated binary endpoint snapshot";
-                        if federated || !endpoint_id.is_local() {
+                        if state.shell.is_some() || !endpoint_id.is_local() {
                             if handle_endpoint_attention(
                                 &mut state,
                                 &mut write_stream,
@@ -1819,7 +1856,7 @@ async fn run_client_loop(
                         unreachable!("retirements are handled before presentation gating")
                     }
                     ServerMessage::ServerShutdown { reason } => {
-                        if !federated && endpoint_id.is_local() {
+                        if state.shell.is_none() && endpoint_id.is_local() {
                             return Err(ClientError::ServerShutdown { reason });
                         }
                         write_stream.fail(
@@ -1840,6 +1877,13 @@ async fn run_client_loop(
                         }
                     }
                     ServerMessage::SemanticNotification(event) => {
+                        if state
+                            .shell
+                            .as_ref()
+                            .is_some_and(|shell| shell.endpoint_is_session_candidate(&endpoint_id))
+                        {
+                            continue;
+                        }
                         if state.shell.is_some() {
                             let (effects, frame) = {
                                 let shell = state.shell.as_mut().expect("checked shell mode");
@@ -2160,7 +2204,7 @@ async fn run_client_loop(
                             }
                             Ok(endpoint::EndpointControlMessage::Snapshot(snapshot)) => snapshot,
                             Err(message)
-                                if federated
+                                if state.shell.is_some()
                                     || !endpoint::protocol_failure_is_fatal(&endpoint_id) =>
                             {
                                 if handle_endpoint_attention(
@@ -2227,12 +2271,17 @@ async fn run_client_loop(
                                 continue;
                             }
                         }
-                        let selected_endpoint = endpoint_catalog
+                        let selected_machine = endpoint_catalog
                             .selected_profile
                             .as_ref()
                             .map_or(endpoint::ClientEndpointId::Local, |profile_id| {
                                 endpoint::ClientEndpointId::Ssh(profile_id.clone())
                             });
+                        let selected_endpoint = state
+                            .shell
+                            .as_ref()
+                            .and_then(|shell| shell.visible_endpoint_for_machine(&selected_machine))
+                            .map_or(selected_machine, |endpoint| endpoint.endpoint_id.clone());
                         let activation_ready = state.shell.as_ref().is_some_and(|shell| {
                             shell.endpoint_has_snapshot(&selected_endpoint)
                                 && (!write_stream
@@ -2246,6 +2295,7 @@ async fn run_client_loop(
                         if activation_ready
                             && needs_surface
                             && pending_activation.is_none()
+                            && !session_switch.busy()
                             && state.deferred_local_activation.is_none()
                         {
                             scheduled_activation = Some(ClientLoopEvent::ActivateEndpoint {
@@ -2293,7 +2343,7 @@ async fn run_client_loop(
                         error = %failure.message,
                         "endpoint transport failed"
                     );
-                    if !federated && failure.endpoint_id.is_local() {
+                    if state.shell.is_none() && failure.endpoint_id.is_local() {
                         return Err(ClientError::ConnectionLost(io::Error::new(
                             failure.kind,
                             failure.message,

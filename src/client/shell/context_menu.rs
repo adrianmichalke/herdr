@@ -6,6 +6,7 @@ impl ClientContextMenuOverlay {
 
         let item = |label, action| ClientContextMenuItem { label, action };
         match &self.target {
+            ClientContextMenuTarget::Machine { .. } => vec![item("Sessions...", Action::Sessions)],
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
                 vec![item("Rename", Action::Rename), item("Close", Action::Close)]
             }
@@ -84,6 +85,23 @@ impl ClientContextMenuOverlay {
 }
 
 impl ClientShellState {
+    pub(super) fn open_machine_context_menu(
+        &mut self,
+        endpoint_id: ClientEndpointId,
+        x: u16,
+        y: u16,
+    ) {
+        if self.visible_endpoint_for_machine(&endpoint_id).is_none() {
+            return;
+        }
+        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::Machine { endpoint_id },
+            x,
+            y,
+            highlighted: 0,
+        }));
+    }
+
     pub(super) fn open_workspace_context_menu(&mut self, workspace_id: String, x: u16, y: u16) {
         let Some(snapshot) = self.snapshot.as_deref() else {
             return;
@@ -192,6 +210,11 @@ impl ClientShellState {
             return;
         };
         match menu.target {
+            ClientContextMenuTarget::Machine { endpoint_id } => {
+                if action == ClientContextMenuAction::Sessions {
+                    self.open_machine_session_picker(&endpoint_id, outcome);
+                }
+            }
             ClientContextMenuTarget::Workspace {
                 workspace_id,
                 close_group,

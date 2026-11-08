@@ -179,36 +179,11 @@ impl SavedSshSetup {
         if self.candidates.is_empty() {
             return Ok(Vec::new());
         }
-        let mut failure = String::new();
-        for candidate in &self.candidates {
-            let output = self.ssh.shell_output(
-                &candidate.platform,
-                &candidate.executable.command(&["session", "list", "--json"]),
-            )?;
-            if output.status.code() == Some(255) {
-                return Err(command_failed("remote SSH connection failed", &output));
-            }
-            if !output.status.success() {
-                failure = command_failed("remote session query failed", &output).to_string();
-                continue;
-            }
-            match serde_json::from_slice::<RemoteSessionListJson>(&output.stdout) {
-                Ok(list) => {
-                    return Ok(list
-                        .sessions
-                        .into_iter()
-                        .filter(|session| {
-                            session.running && crate::session::validate_name(&session.name).is_ok()
-                        })
-                        .map(|session| session.name)
-                        .collect())
-                }
-                Err(error) => failure = format!("invalid remote session list: {error}"),
-            }
-        }
-        Err(io::Error::other(format!(
-            "could not discover remote Herdr sessions: {failure}; specify --remote-session to continue"
-        )))
+        Ok(query_remote_sessions(&self.ssh, &self.candidates)?
+            .into_iter()
+            .filter(|session| session.running)
+            .map(|session| session.name)
+            .collect())
     }
 
     pub(crate) fn prepare(
@@ -274,15 +249,64 @@ impl SavedSshSetup {
     }
 }
 
-#[derive(Deserialize)]
-struct RemoteSessionListJson {
-    sessions: Vec<RemoteSessionJson>,
+pub(super) fn list_remote_sessions(
+    ssh: &RemoteSsh,
+) -> io::Result<Vec<crate::session::SessionInfo>> {
+    let platform = detect_remote_platform(ssh)?.platform;
+    let remote_herdr = RemoteHerdr::for_platform(platform);
+    let candidates = remote_binary_candidates(ssh, &remote_herdr)?;
+    if candidates.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "remote Herdr is not installed; use interactive SSH setup to install it",
+        ));
+    }
+    query_remote_sessions(ssh, &candidates)
+}
+
+fn query_remote_sessions(
+    ssh: &RemoteSsh,
+    candidates: &[RemoteHerdr],
+) -> io::Result<Vec<crate::session::SessionInfo>> {
+    let mut failure = String::new();
+    for candidate in candidates {
+        let output = ssh.shell_output(
+            &candidate.platform,
+            &candidate.executable.session_command(
+                crate::session::DEFAULT_SESSION_NAME,
+                &["session", "list", "--json"],
+            ),
+        )?;
+        if output.status.code() == Some(255) {
+            return Err(command_failed("remote SSH connection failed", &output));
+        }
+        if !output.status.success() {
+            failure = command_failed("remote session query failed", &output).to_string();
+            continue;
+        }
+        match parse_remote_sessions(&output.stdout) {
+            Ok(sessions) => return Ok(sessions),
+            Err(error) => failure = format!("invalid remote session list: {error}"),
+        }
+    }
+    Err(io::Error::other(format!(
+        "could not discover remote Herdr sessions: {failure}; specify --remote-session to continue"
+    )))
+}
+
+fn parse_remote_sessions(stdout: &[u8]) -> io::Result<Vec<crate::session::SessionInfo>> {
+    let list: RemoteSessionListJson = serde_json::from_slice(stdout)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok(list
+        .sessions
+        .into_iter()
+        .filter(|session| crate::session::validate_name(&session.name).is_ok())
+        .collect())
 }
 
 #[derive(Deserialize)]
-struct RemoteSessionJson {
-    name: String,
-    running: bool,
+struct RemoteSessionListJson {
+    sessions: Vec<crate::session::SessionInfo>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -387,9 +411,7 @@ impl RemoteExecutable {
 
     fn session_args<'a>(session_name: &'a str, args: &[&'a str]) -> Vec<&'a str> {
         let mut session_args = Vec::with_capacity(args.len() + 2);
-        if session_name != crate::session::DEFAULT_SESSION_NAME {
-            session_args.extend(["--session", session_name]);
-        }
+        session_args.extend(["--session", session_name]);
         session_args.extend_from_slice(args);
         session_args
     }
@@ -408,9 +430,15 @@ impl RemoteExecutable {
         match self {
             Self::PosixShellPath(path) => format!(
                 "test -x {path} && {}",
-                self.command(&["status", "client", "--json"])
+                self.session_command(
+                    crate::session::DEFAULT_SESSION_NAME,
+                    &["status", "client", "--json"],
+                )
             ),
-            Self::WindowsPath(_) => self.command(&["status", "client", "--json"]),
+            Self::WindowsPath(_) => self.session_command(
+                crate::session::DEFAULT_SESSION_NAME,
+                &["status", "client", "--json"],
+            ),
         }
     }
 
@@ -2976,10 +3004,8 @@ fn reattach_command(
     if live_handoff {
         command.push_str(" --handoff");
     }
-    if session_name != crate::session::DEFAULT_SESSION_NAME {
-        command.push_str(" --session ");
-        command.push_str(&crate::platform::remote_reattach_argument(session_name));
-    }
+    command.push_str(" --session ");
+    command.push_str(&crate::platform::remote_reattach_argument(session_name));
     command
 }
 
@@ -4572,6 +4598,90 @@ mod tests {
     }
 
     #[test]
+    fn remote_session_discovery_preserves_default_stopped_and_unreachable_sessions() {
+        let session = |name: &str, default: bool, running: bool, error: Option<&str>| {
+            serde_json::json!({
+                "name": name,
+                "default": default,
+                "running": running,
+                "connection_error": error,
+                "socket_path": format!("/remote/{name}/herdr.sock"),
+                "session_dir": format!("/remote/{name}")
+            })
+        };
+        let stdout = serde_json::to_vec(&serde_json::json!({
+            "sessions": [
+                session("default", true, false, None),
+                session("running", false, true, None),
+                session("stopped", false, false, None),
+                session("unreachable", false, false, Some("permission denied")),
+                session("../invalid", false, true, None)
+            ]
+        }))
+        .unwrap();
+        let sessions = parse_remote_sessions(&stdout).unwrap();
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session.name.as_str())
+                .collect::<Vec<_>>(),
+            ["default", "running", "stopped", "unreachable"]
+        );
+        assert!(sessions[0].default);
+        assert!(!sessions[0].running);
+        assert!(sessions[1].running);
+        assert!(!sessions[2].running);
+        assert_eq!(
+            sessions[3].connection_error.as_deref(),
+            Some("permission denied")
+        );
+        assert_eq!(sessions[3].socket_path, "/remote/unreachable/herdr.sock");
+        assert_eq!(sessions[3].session_dir, "/remote/unreachable");
+    }
+
+    #[test]
+    fn remote_session_discovery_rejects_invalid_json_and_incomplete_results() {
+        for stdout in [
+            &b"not json"[..],
+            &b"{}"[..],
+            &br#"{"sessions":[{"name":"work","running":true}]}"#[..],
+        ] {
+            assert_eq!(
+                parse_remote_sessions(stdout).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+    }
+
+    #[test]
+    fn remote_session_commands_quote_paths_and_explicitly_select_default() {
+        let posix = RemoteExecutable::PosixShellPath(shell_quote("/opt/o'brien/herdr bin/herdr"));
+        let windows_path = r"C:\Users\O'Brien\Herdr Bin\herdr.exe";
+        let windows = RemoteExecutable::WindowsPath(windows_path.into());
+        for session in ["default", "--work", "a.b_c-1"] {
+            let args = ["session", "list", "--json"];
+            assert_eq!(
+                posix.session_command(session, &args),
+                format!(
+                    "'/opt/o'\\''brien/herdr bin/herdr' --session {session} session list --json"
+                )
+            );
+            let script = decode_windows_command(&windows.session_command(session, &args));
+            assert!(
+                script.ends_with(&format!(
+                    "& {} '--session' {} session list '--json'; exit $LASTEXITCODE",
+                    crate::platform::quote_powershell_arg(windows_path),
+                    crate::platform::quote_powershell_arg(session),
+                )),
+                "{script}"
+            );
+            let script = decode_windows_command(&windows.bridge_command(session));
+            assert!(script.contains(&crate::platform::quote_powershell_arg(windows_path)));
+            assert!(script.contains(&format!("--session {session} remote-client-bridge")));
+        }
+    }
+
+    #[test]
     fn saved_machine_server_commands_are_scoped_to_the_explicit_session() {
         let herdr =
             RemoteHerdr::for_platform(RemotePlatform::from_uname("Linux", "x86_64").unwrap());
@@ -4579,6 +4689,7 @@ mod tests {
             (&["status", "server", "--json"][..], "status server --json"),
             (&["server", "stop"][..], "server stop"),
             (&["remote-client-bridge"][..], "remote-client-bridge"),
+            (&["session", "list", "--json"][..], "session list --json"),
         ] {
             assert_eq!(
                 herdr.executable.session_command("agents", args),
@@ -4588,7 +4699,7 @@ mod tests {
                 herdr
                     .executable
                     .session_command(crate::session::DEFAULT_SESSION_NAME, args),
-                format!("{} {command}", herdr.executable.display())
+                format!("{} --session default {command}", herdr.executable.display())
             );
         }
         assert!(herdr
@@ -5164,7 +5275,17 @@ mod tests {
             (
                 "client status",
                 executable.status_client_command(),
-                "& herdr.exe status client '--json'; exit $LASTEXITCODE",
+                "& herdr.exe '--session' default status client '--json'; exit $LASTEXITCODE",
+            ),
+            (
+                "default session discovery",
+                executable.session_command("default", &["session", "list", "--json"]),
+                "& herdr.exe '--session' default session list '--json'; exit $LASTEXITCODE",
+            ),
+            (
+                "default session bridge",
+                executable.bridge_command("default"),
+                "$process = Start-Process -FilePath herdr.exe -ArgumentList '--session default remote-client-bridge' -NoNewWindow -PassThru -ErrorAction Stop; $null = $process.Handle; $process.WaitForExit(); exit $process.ExitCode",
             ),
             (
                 "named server status",
@@ -5459,7 +5580,7 @@ function Get-Process {
                 RemoteKeybindings::Local,
                 false,
             ),
-            "herdr --remote 'host name'"
+            "herdr --remote 'host name' --session default"
         );
         assert_eq!(
             reattach_command(
@@ -5469,7 +5590,7 @@ function Get-Process {
                 RemoteKeybindings::Server,
                 false,
             ),
-            "herdr --remote host --remote-keybindings server"
+            "herdr --remote host --remote-keybindings server --session default"
         );
         assert_eq!(
             reattach_command(
@@ -5479,7 +5600,7 @@ function Get-Process {
                 RemoteKeybindings::Local,
                 true,
             ),
-            "herdr --remote host --handoff"
+            "herdr --remote host --handoff --session default"
         );
     }
 
@@ -5547,7 +5668,7 @@ function Get-Process {
             remote_herdr
                 .executable
                 .bridge_command(crate::session::DEFAULT_SESSION_NAME),
-            "printf '\\n%s\\n' 'herdr-remote-output-ready:1'\nexec \"$HOME/.local/bin/herdr\" remote-client-bridge"
+            "printf '\\n%s\\n' 'herdr-remote-output-ready:1'\nexec \"$HOME/.local/bin/herdr\" --session default remote-client-bridge"
         );
         assert_eq!(
             remote_herdr.executable.saved_bridge_command("agents"),
@@ -5568,7 +5689,7 @@ function Get-Process {
             remote_herdr
                 .executable
                 .bridge_command(crate::session::DEFAULT_SESSION_NAME),
-            "printf '\\n%s\\n' 'herdr-remote-output-ready:1'\nexec /usr/bin/herdr remote-client-bridge"
+            "printf '\\n%s\\n' 'herdr-remote-output-ready:1'\nexec /usr/bin/herdr --session default remote-client-bridge"
         );
     }
 
@@ -5586,7 +5707,7 @@ function Get-Process {
             remote_herdr
                 .executable
                 .bridge_command(crate::session::DEFAULT_SESSION_NAME),
-            "printf '\\n%s\\n' 'herdr-remote-output-ready:1'\nexec '/opt/herdr bin/herdr' remote-client-bridge"
+            "printf '\\n%s\\n' 'herdr-remote-output-ready:1'\nexec '/opt/herdr bin/herdr' --session default remote-client-bridge"
         );
     }
 
@@ -5604,7 +5725,7 @@ function Get-Process {
             remote_herdr
                 .executable
                 .bridge_command(crate::session::DEFAULT_SESSION_NAME),
-            "printf '\\n%s\\n' 'herdr-remote-output-ready:1'\nexec /opt/homebrew/bin/herdr remote-client-bridge"
+            "printf '\\n%s\\n' 'herdr-remote-output-ready:1'\nexec /opt/homebrew/bin/herdr --session default remote-client-bridge"
         );
         assert_eq!(remote_herdr.platform.asset_key(), "macos-aarch64");
     }
@@ -5701,7 +5822,7 @@ function Get-Process {
             remote_herdr
                 .executable
                 .bridge_command(crate::session::DEFAULT_SESSION_NAME),
-            "printf '\\n%s\\n' 'herdr-remote-output-ready:1'\nexec '/opt/herdr'\\''s/bin/herdr' remote-client-bridge"
+            "printf '\\n%s\\n' 'herdr-remote-output-ready:1'\nexec '/opt/herdr'\\''s/bin/herdr' --session default remote-client-bridge"
         );
     }
 

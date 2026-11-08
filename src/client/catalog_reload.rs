@@ -57,7 +57,16 @@ pub(super) fn apply_profiles(
     }
     catalog.ssh = profiles;
     if active_removed {
-        endpoints.select_unavailable_local();
+        let local = state
+            .shell
+            .as_ref()
+            .and_then(|shell| {
+                shell.visible_endpoint_for_machine(&endpoint::ClientEndpointId::Local)
+            })
+            .map_or(endpoint::ClientEndpointId::Local, |endpoint| {
+                endpoint.endpoint_id.clone()
+            });
+        endpoints.select_unavailable(&local);
         catalog.select_local();
         state.freeze_presentation();
         if let Some(shell) = state.shell.as_mut() {
@@ -113,6 +122,124 @@ mod tests {
 
     fn state() -> ClientState {
         ClientState::test_new()
+    }
+
+    #[test]
+    fn removing_active_ssh_falls_back_to_the_selected_local_session_not_its_retired_initial_id() {
+        let now = Instant::now();
+        let mut state = state();
+        let local = ClientEndpointId::Local.with_session("second").unwrap();
+        let mut catalog = EndpointCatalog::default();
+        let profile = endpoint::SavedSshEndpoint::new("Build", "build", "main").unwrap();
+        let remote = ClientEndpointId::Ssh(profile.id.clone());
+        catalog.ssh.push(profile);
+        let shell = state.shell.as_mut().unwrap();
+        shell.set_endpoint_catalog(&catalog.ssh);
+        assert!(shell.stage_session_endpoint(
+            &ClientEndpointId::Local,
+            local.clone(),
+            "second".into()
+        ));
+        shell.commit_session_endpoint(&local);
+        shell.remove_session_endpoint(&ClientEndpointId::Local);
+        let mut endpoints = EndpointRegistry::empty();
+        let disconnected = Arc::new(AtomicUsize::new(0));
+        endpoints.insert(
+            local.clone(),
+            Transport(disconnected.clone()),
+            41,
+            Default::default(),
+            false,
+        );
+        endpoints.insert(
+            remote.clone(),
+            Transport(Arc::new(AtomicUsize::new(0))),
+            71,
+            Default::default(),
+            true,
+        );
+        assert!(endpoints.set_active(&remote));
+        endpoints.unfreeze_input();
+        let mut supervisors = EndpointSupervisors::new(&catalog.ssh, now);
+        let mut commands = endpoint_commands::EndpointCommands::default();
+        assert!(apply_profiles(
+            &mut state,
+            &mut endpoints,
+            &mut commands,
+            &mut supervisors,
+            &mut catalog,
+            Vec::new(),
+            now
+        ));
+        assert_eq!(endpoints.active_id(), &local);
+        assert!(endpoints.accepts(&local, 41));
+        assert!(endpoints.connection(&ClientEndpointId::Local).is_none());
+        assert!(state.shell.as_ref().unwrap().endpoint_is_active(&local));
+        assert_eq!(disconnected.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn label_reload_keeps_transient_selected_session_and_configured_catalog() {
+        let now = Instant::now();
+        let mut state = state();
+        let mut profile = endpoint::SavedSshEndpoint::new("Build", "build", "main").unwrap();
+        let initial = ClientEndpointId::Ssh(profile.id.clone());
+        let selected = initial.with_session("second").unwrap();
+        let mut catalog = EndpointCatalog::default();
+        catalog.ssh.push(profile.clone());
+        let shell = state.shell.as_mut().unwrap();
+        shell.set_endpoint_catalog(&catalog.ssh);
+        assert!(shell.stage_session_endpoint(&initial, selected.clone(), "second".into()));
+        shell.commit_session_endpoint(&selected);
+        shell.remove_session_endpoint(&initial);
+        let disconnected = Arc::new(AtomicUsize::new(0));
+        let mut endpoints = EndpointRegistry::empty();
+        endpoints.insert(
+            selected.clone(),
+            Transport(disconnected.clone()),
+            71,
+            Default::default(),
+            true,
+        );
+        assert!(endpoints.set_active(&selected));
+        endpoints.unfreeze_input();
+        let mut supervisors = EndpointSupervisors::new(&catalog.ssh, now);
+        supervisors.remove(&initial);
+        let mut target = profile.clone();
+        target.session = "second".into();
+        supervisors.adopt_session(
+            selected.clone(),
+            endpoint::EndpointSessionTarget::Ssh(target),
+            Some(profile.clone()),
+            71,
+            now,
+        );
+        let mut commands = endpoint_commands::EndpointCommands::default();
+        profile.label = "Renamed".into();
+        assert!(!apply_profiles(
+            &mut state,
+            &mut endpoints,
+            &mut commands,
+            &mut supervisors,
+            &mut catalog,
+            vec![profile],
+            now
+        ));
+        assert_eq!(endpoints.active_id(), &selected);
+        assert!(endpoints.accepts(&selected, 71));
+        assert!(endpoints.active_surface_available());
+        assert_eq!(disconnected.load(Ordering::Relaxed), 0);
+        let visible = state
+            .shell
+            .as_ref()
+            .unwrap()
+            .visible_endpoint_for_machine(&initial)
+            .unwrap();
+        assert_eq!(visible.endpoint_id, selected);
+        assert_eq!(visible.session_name, "second");
+        assert_eq!(visible.label, "Renamed");
+        assert_eq!(catalog.ssh[0].session, "main");
+        assert!(!serde_json::to_string(&catalog).unwrap().contains("second"));
     }
 
     #[test]

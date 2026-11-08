@@ -129,8 +129,8 @@ impl EndpointRegistry {
                 .is_some_and(|connection| connection.surface_active)
     }
 
-    pub(crate) fn select_unavailable_local(&mut self) {
-        self.active = ClientEndpointId::Local;
+    pub(crate) fn select_unavailable(&mut self, endpoint_id: &ClientEndpointId) {
+        self.active = endpoint_id.clone();
         self.freeze_input();
     }
 
@@ -301,6 +301,19 @@ impl EndpointRegistry {
                 self.record_failure(endpoint_id.clone(), error);
                 EndpointSendOutcome::NotSent
             }
+        }
+    }
+
+    pub(crate) fn send_for_generation(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        message: &ClientMessage,
+    ) -> EndpointSendOutcome {
+        if self.accepts(endpoint_id, generation) {
+            self.send_to(endpoint_id, message)
+        } else {
+            EndpointSendOutcome::NotSent
         }
     }
 

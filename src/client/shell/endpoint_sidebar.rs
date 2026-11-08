@@ -8,7 +8,7 @@ fn collapsed_groups_for_endpoint<'a>(
     if endpoint_id.is_local() {
         Some(state.collapsed_groups)
     } else {
-        state.remote_collapsed_groups.get(endpoint_id)
+        state.remote_collapsed_groups.get(endpoint_id.machine_ref())
     }
 }
 
@@ -25,9 +25,16 @@ pub(super) fn render_collapsed(
     let mut total_rows = 0usize;
     let mut selected_row = None;
     let reveal = std::mem::take(state.reveal_navigation_workspace);
-    for endpoint in state.endpoints {
+    for endpoint in state
+        .endpoints
+        .iter()
+        .filter(|endpoint| !endpoint.session_hidden)
+    {
         total_rows += 1;
-        if state.collapsed_endpoints.contains(&endpoint.endpoint_id) {
+        if state
+            .collapsed_endpoints
+            .contains(endpoint.endpoint_id.machine_ref())
+        {
             continue;
         }
         if let Some(snapshot) = endpoint.snapshot.as_deref() {
@@ -59,13 +66,20 @@ pub(super) fn render_collapsed(
     hits.workspace_max_scroll = max_scroll;
     let mut skip = *state.workspace_scroll;
     let mut y = workspace_area.y;
-    for (index, endpoint) in state.endpoints.iter().enumerate() {
+    for (index, endpoint) in state
+        .endpoints
+        .iter()
+        .filter(|endpoint| !endpoint.session_hidden)
+        .enumerate()
+    {
         if y >= workspace_area.bottom() {
             break;
         }
         let rect = Rect::new(workspace_area.x, y, workspace_area.width, 1);
         let active = &endpoint.endpoint_id == state.active_endpoint_id;
-        let collapsed = state.collapsed_endpoints.contains(&endpoint.endpoint_id);
+        let collapsed = state
+            .collapsed_endpoints
+            .contains(endpoint.endpoint_id.machine_ref());
         if skip > 0 {
             skip -= 1;
         } else {
@@ -274,9 +288,17 @@ pub(super) fn render_expanded(
         },
     }
     let mut rows = Vec::new();
-    for (endpoint_index, endpoint) in state.endpoints.iter().enumerate() {
+    for (endpoint_index, endpoint) in state
+        .endpoints
+        .iter()
+        .enumerate()
+        .filter(|(_, endpoint)| !endpoint.session_hidden)
+    {
         rows.push(Row::Endpoint(endpoint_index));
-        if state.collapsed_endpoints.contains(&endpoint.endpoint_id) {
+        if state
+            .collapsed_endpoints
+            .contains(endpoint.endpoint_id.machine_ref())
+        {
             continue;
         }
         if let Some(snapshot) = endpoint.snapshot.as_deref() {
@@ -406,7 +428,9 @@ pub(super) fn render_expanded(
                 }
                 let endpoint = &state.endpoints[*index];
                 let rect = Rect::new(body.x, y, content_width, 1);
-                let collapsed = state.collapsed_endpoints.contains(&endpoint.endpoint_id);
+                let collapsed = state
+                    .collapsed_endpoints
+                    .contains(endpoint.endpoint_id.machine_ref());
                 let marker = if collapsed { "▸" } else { "▾" };
                 let status_badge = render_endpoint_row(
                     buffer,
@@ -583,7 +607,9 @@ fn active_endpoint_label<'a>(state: &'a ShellRenderState<'_>) -> &'a str {
     state
         .endpoints
         .iter()
-        .find(|endpoint| &endpoint.endpoint_id == state.active_endpoint_id)
+        .find(|endpoint| {
+            !endpoint.session_hidden && &endpoint.endpoint_id == state.active_endpoint_id
+        })
         .map_or("Local", |endpoint| endpoint.label.as_str())
 }
 

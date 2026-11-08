@@ -63,8 +63,8 @@ impl ClientShellState {
                     || self.endpoint_is_online(&endpoint_id)
                     || self.endpoint_status(&endpoint_id) == Some(ClientEndpointStatus::Disabled)))
         {
-            if !self.collapsed_endpoints.remove(&endpoint_id) {
-                self.collapsed_endpoints.insert(endpoint_id.clone());
+            if !self.collapsed_endpoints.remove(endpoint_id.machine_ref()) {
+                self.collapsed_endpoints.insert(endpoint_id.machine_id());
             }
             outcome.repaint = true;
             if !collapse_toggle && endpoint_id.is_local() {
@@ -119,7 +119,9 @@ impl ClientShellState {
             let workspaces = self
                 .endpoints
                 .iter()
-                .filter(|endpoint| endpoint.status == ClientEndpointStatus::Online)
+                .filter(|endpoint| {
+                    !endpoint.session_hidden && endpoint.status == ClientEndpointStatus::Online
+                })
                 .flat_map(|endpoint| {
                     endpoint
                         .snapshot

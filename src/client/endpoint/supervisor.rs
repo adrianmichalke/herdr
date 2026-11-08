@@ -48,11 +48,28 @@ pub(crate) enum EndpointSupervisorEvent {
 #[derive(Clone)]
 enum ConnectTarget {
     Local(PathBuf),
+    LocalSession(String),
     Ssh(super::SavedSshEndpoint),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum EndpointSessionTarget {
+    Local(String),
+    Ssh(super::SavedSshEndpoint),
+}
+
+impl From<EndpointSessionTarget> for ConnectTarget {
+    fn from(target: EndpointSessionTarget) -> Self {
+        match target {
+            EndpointSessionTarget::Local(name) => Self::LocalSession(name),
+            EndpointSessionTarget::Ssh(profile) => Self::Ssh(profile),
+        }
+    }
 }
 
 struct ReconnectState {
     target: ConnectTarget,
+    configured_profile: Option<super::SavedSshEndpoint>,
     attempts: u32,
     next_attempt: Option<Instant>,
     in_flight: bool,
@@ -65,8 +82,13 @@ struct ReconnectState {
 
 impl ReconnectState {
     fn new(target: ConnectTarget, now: Instant) -> Self {
+        let configured_profile = match &target {
+            ConnectTarget::Ssh(profile) => Some(profile.clone()),
+            _ => None,
+        };
         Self {
             target,
+            configured_profile,
             attempts: 0,
             next_attempt: Some(now),
             in_flight: false,
@@ -139,6 +161,51 @@ impl EndpointSupervisors {
         }
     }
 
+    pub(crate) fn reserve_generation(&mut self) -> u64 {
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.saturating_add(1);
+        generation
+    }
+
+    pub(crate) fn remove(&mut self, endpoint_id: &ClientEndpointId) {
+        if let Some(previous) = self.endpoints.remove(endpoint_id) {
+            if !previous.completed.load(Ordering::Acquire) {
+                self.retired
+                    .insert(endpoint_id.clone(), Arc::clone(&previous.completed));
+            }
+        }
+    }
+
+    pub(crate) fn adopt_session(
+        &mut self,
+        endpoint_id: ClientEndpointId,
+        target: EndpointSessionTarget,
+        configured_profile: Option<super::SavedSshEndpoint>,
+        generation: u64,
+        now: Instant,
+    ) {
+        self.remove(&endpoint_id);
+        let mut state = ReconnectState::new(target.into(), now);
+        state.configured_profile = configured_profile;
+        state.generation = Some(generation);
+        state.next_attempt = None;
+        self.next_generation = self.next_generation.max(generation.saturating_add(1));
+        self.endpoints.insert(endpoint_id, state);
+    }
+
+    pub(crate) fn retry_session(
+        &mut self,
+        endpoint_id: ClientEndpointId,
+        target: EndpointSessionTarget,
+        configured_profile: Option<super::SavedSshEndpoint>,
+        now: Instant,
+    ) {
+        self.remove(&endpoint_id);
+        let mut state = ReconnectState::new(target.into(), now);
+        state.configured_profile = configured_profile;
+        self.endpoints.insert(endpoint_id, state);
+    }
+
     pub(crate) fn reconcile_profiles(
         &mut self,
         profiles: &[super::SavedSshEndpoint],
@@ -147,7 +214,7 @@ impl EndpointSupervisors {
         let mut retired = Vec::new();
         let retiring = &mut self.retired;
         self.endpoints.retain(|endpoint_id, state| {
-            let ConnectTarget::Ssh(previous) = &state.target else {
+            let Some(previous) = state.configured_profile.as_ref() else {
                 return true;
             };
             let keep = profiles.iter().any(|profile| {
@@ -168,11 +235,21 @@ impl EndpointSupervisors {
             keep
         });
         for profile in profiles.iter().filter(|profile| profile.enabled) {
-            let state = self
+            let existing = self
                 .endpoints
-                .entry(ClientEndpointId::Ssh(profile.id.clone()))
-                .or_insert_with(|| ReconnectState::new(ConnectTarget::Ssh(profile.clone()), now));
-            state.target = ConnectTarget::Ssh(profile.clone());
+                .iter_mut()
+                .find(|(id, _)| id.ssh_profile_id() == Some(&profile.id));
+            if let Some((_, state)) = existing {
+                state.configured_profile = Some(profile.clone());
+                if let ConnectTarget::Ssh(selected) = &mut state.target {
+                    selected.label = profile.label.clone();
+                }
+            } else {
+                self.endpoints.insert(
+                    ClientEndpointId::Ssh(profile.id.clone()),
+                    ReconnectState::new(ConnectTarget::Ssh(profile.clone()), now),
+                );
+            }
         }
         retired
     }
@@ -473,6 +550,15 @@ fn connect_once(
             })?;
             (stream, Box::new(()))
         }
+        ConnectTarget::LocalSession(name) => {
+            let path = crate::server::ensure_session_server(name, &cancelled)?;
+            let stream = crate::ipc::connect_local_stream_cancellable(
+                &path,
+                &cancelled,
+                Instant::now() + super::super::handshake::LOCAL_HANDSHAKE_READ_TIMEOUT,
+            )?;
+            (stream, Box::new(()))
+        }
         ConnectTarget::Ssh(profile) => {
             let connected = crate::remote::connect_saved_ssh(
                 profile.id.as_str(),
@@ -497,7 +583,7 @@ fn connect_once(
         options.endpoint_keybindings,
         options.mouse_capture,
         false,
-        matches!(target, ConnectTarget::Local(_)),
+        !matches!(target, ConnectTarget::Ssh(_)),
         &cancelled,
     )
     .map_err(handshake_error)?;
@@ -518,7 +604,7 @@ fn connect_once(
         handshake.endpoint_capabilities.unwrap_or_default(),
     );
     if !negotiation.supports_surface_interest()
-        || (!endpoint_id.is_local() && !negotiation.supports_health_check())
+        || (matches!(target, ConnectTarget::Ssh(_)) && !negotiation.supports_health_check())
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -535,6 +621,23 @@ fn connect_once(
         writer,
         negotiation,
     })
+}
+
+pub(crate) fn connect_session_once(
+    target: EndpointSessionTarget,
+    options: EndpointConnectOptions,
+    endpoint_id: ClientEndpointId,
+    generation: u64,
+    cancelled: Arc<AtomicBool>,
+) -> Result<EndpointSupervisorEvent, std::io::Error> {
+    connect_once(
+        &target.into(),
+        options,
+        endpoint_id,
+        generation,
+        cancelled,
+        Arc::new(AtomicBool::new(false)),
+    )
 }
 
 fn failure_needs_attention(error: &std::io::Error) -> bool {
@@ -828,6 +931,43 @@ mod tests {
             session: "agents".into(),
             enabled: true,
         }
+    }
+
+    #[test]
+    fn selected_session_survives_label_reload_without_recreating_initial_connection() {
+        let now = Instant::now();
+        let mut configured = profile();
+        let initial = ClientEndpointId::Ssh(configured.id.clone());
+        let selected = initial.with_session("second").unwrap();
+        let mut supervisors = EndpointSupervisors::new(&[configured.clone()], now);
+        supervisors.remove(&initial);
+        let mut target = configured.clone();
+        target.session = "second".into();
+        supervisors.adopt_session(
+            selected.clone(),
+            EndpointSessionTarget::Ssh(target),
+            Some(configured.clone()),
+            71,
+            now,
+        );
+        configured.label = "Renamed".into();
+        assert!(supervisors
+            .reconcile_profiles(&[configured.clone()], now)
+            .is_empty());
+        assert!(!supervisors.endpoints.contains_key(&initial));
+        assert_eq!(supervisors.endpoints[&selected].generation, Some(71));
+        assert!(supervisors.endpoints[&selected].next_attempt.is_none());
+        match &supervisors.endpoints[&selected].target {
+            ConnectTarget::Ssh(target) => assert_eq!(target.session, "second"),
+            _ => panic!("selected session lost its SSH target"),
+        }
+        configured.session = "configured-edit".into();
+        assert_eq!(
+            supervisors.reconcile_profiles(&[configured], now),
+            vec![selected.clone()]
+        );
+        assert!(!supervisors.record_status(&selected, 71, ClientEndpointStatus::Online, now));
+        assert!(supervisors.endpoints.contains_key(&initial));
     }
 
     #[test]

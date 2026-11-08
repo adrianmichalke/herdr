@@ -7,6 +7,74 @@ use crate::client::endpoint::{
 };
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
+#[test]
+fn session_projection_retires_colliding_pane_input_and_keeps_candidates_hidden() {
+    let runtime = crate::app::state::AppState::test_with_adversarial_identity_state();
+    runtime.assert_invariants_for_test();
+    let workspace = &runtime.workspaces[0];
+    let pane_id = workspace.focused_pane_id().unwrap();
+    let public_pane = crate::workspace::public_pane_id_for_number(
+        &workspace.id,
+        workspace.public_pane_number(pane_id).unwrap(),
+    );
+    let mut projection = snapshot();
+    projection.focused_workspace_id = Some(workspace.id.clone());
+    projection.workspaces[0].workspace_id = workspace.id.clone();
+    projection.tabs[0].workspace_id = workspace.id.clone();
+    projection.panes[0].workspace_id = workspace.id.clone();
+    projection.focused_pane_id = Some(public_pane.clone());
+    projection.panes[0].pane_id = public_pane.clone();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_endpoint_snapshot_for_generation(
+        &ClientEndpointId::Local,
+        41,
+        Box::new(projection.clone()),
+    );
+    state.set_host_reports_key_releases(true);
+    let press = crate::input::TerminalKey::new(KeyCode::Char('z'), KeyModifiers::empty());
+    assert!(!state
+        .handle_raw_events(vec![RawInputEvent::Key(press.clone())])
+        .requests
+        .is_empty());
+    state.pane_scroll_queued.insert(public_pane.clone(), 1);
+    state.previous_pane_id = Some(public_pane.clone());
+    let generation = state.copy_session_generation;
+    let target = ClientEndpointId::Local.with_session("second").unwrap();
+    assert!(state.stage_session_endpoint(
+        &ClientEndpointId::Local,
+        target.clone(),
+        "second".into()
+    ));
+    state.set_endpoint_status(&target, ClientEndpointStatus::Online);
+    state.cache_endpoint_snapshot_inactive_for_generation(&target, 97, Box::new(projection));
+    assert!(!state.multi_endpoint_active());
+    assert_eq!(
+        super::super::aggregate_navigation::cached_endpoint_snapshots(&state.endpoints).count(),
+        1
+    );
+    assert!(state.activate_endpoint_projection(&target));
+    assert!(state.pane_scroll_queued.is_empty());
+    assert!(state.previous_pane_id.is_none());
+    assert!(state.copy_session_generation > generation);
+    assert_eq!(state.graphics.scope(), "boot-1");
+    let released = state.handle_raw_events(vec![RawInputEvent::Key(
+        press.with_kind(crossterm::event::KeyEventKind::Release),
+    )]);
+    assert!(released.requests.is_empty());
+    let retired = state.commit_session_endpoint(&target);
+    assert_eq!(retired, vec![ClientEndpointId::Local]);
+    state.remove_session_endpoint(&ClientEndpointId::Local);
+    assert_eq!(
+        state
+            .visible_endpoint_for_machine(&ClientEndpointId::Local)
+            .unwrap()
+            .session_name,
+        "second"
+    );
+    assert!(!state.multi_endpoint_active());
+    runtime.assert_invariants_for_test();
+}
+
 fn remote_profile() -> SavedSshEndpoint {
     SavedSshEndpoint {
         id: ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
