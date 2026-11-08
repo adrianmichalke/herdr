@@ -538,6 +538,7 @@ mod tests {
     fn empty_snapshot() -> crate::persist::SessionSnapshot {
         crate::persist::SessionSnapshot {
             version: 0,
+            agent_activity_sequence: None,
             workspaces: Vec::new(),
             active: None,
             selected: 0,

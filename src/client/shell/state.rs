@@ -897,6 +897,7 @@ pub(crate) struct ClientShellState {
     pub(super) selection_repaint_deadline: Option<std::time::Instant>,
     pub(super) hits: ShellHitMap,
     pub(super) endpoints: Vec<ClientShellEndpoint>,
+    pub(super) agent_recency: super::agent_recency::AgentRecencyCache,
     pub(super) active_endpoint_id: ClientEndpointId,
     pub(super) collapsed_endpoints: HashSet<ClientEndpointId>,
     pub(super) mode: ClientShellMode,
@@ -994,6 +995,10 @@ pub(super) struct WorkspaceEntry {
 
 impl ClientShellState {
     pub(crate) fn new(mut config: ClientShellConfig) -> Self {
+        let agent_recency =
+            super::agent_recency::AgentRecencyCache::load(config.preferences_path.as_deref());
+        let mut local = local_endpoint();
+        local.agent_recency = agent_recency.ranks(&ClientEndpointId::Local);
         let preferences = config.preferences.clone();
         let local_config_diagnostic = config.startup_config_diagnostic.take();
         let overlay = config
@@ -1070,7 +1075,8 @@ impl ClientShellState {
             last_composed_at: None,
             selection_repaint_deadline: None,
             hits: ShellHitMap::default(),
-            endpoints: vec![local_endpoint()],
+            endpoints: vec![local],
+            agent_recency,
             active_endpoint_id: ClientEndpointId::Local,
             collapsed_endpoints: HashSet::new(),
             mode: ClientShellMode::Terminal,
@@ -1883,6 +1889,7 @@ impl ClientShellState {
         self.selection_autoscroll_deadline
             .into_iter()
             .chain(self.selection_repaint_deadline)
+            .chain(self.agent_recency.deadline())
             .min()
             .map(|deadline| deadline.saturating_duration_since(now).min(default))
             .unwrap_or(default)

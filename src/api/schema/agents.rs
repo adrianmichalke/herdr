@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use super::common::{AgentStatus, ReadFormat, ReadSource};
+use crate::agent_activity::AgentActivity;
 use crate::cli::agent::bindings;
 use crate::cli::projection::{cli_params, Field};
 
@@ -241,6 +242,8 @@ pub struct AgentInfo {
     pub interactive_ready: bool,
     #[serde(default)]
     pub state_change_seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<AgentActivity>,
     /// The current idle transition completed work, independently of who has viewed it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_seq: Option<u64>,
@@ -257,4 +260,63 @@ pub struct AgentSessionInfo {
     pub agent: String,
     pub kind: crate::agent_resume::AgentSessionRefKind,
     pub value: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn legacy_agent_info() -> serde_json::Value {
+        serde_json::json!({
+            "terminal_id": "terminal",
+            "agent_status": "idle",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "pane_id": "pane",
+            "focused": false,
+            "revision": 7
+        })
+    }
+
+    #[test]
+    fn agent_info_activity_is_optional_for_legacy_json() {
+        let mut value = legacy_agent_info();
+        let agent: AgentInfo = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(agent.activity, None);
+        assert!(serde_json::to_value(&agent)
+            .unwrap()
+            .get("activity")
+            .is_none());
+
+        value["activity"] = serde_json::Value::Null;
+        assert_eq!(serde_json::from_value::<AgentInfo>(value).unwrap(), agent);
+    }
+
+    #[test]
+    fn agent_info_activity_round_trips_with_or_without_a_timestamp() {
+        for changed_at_ms in [Some(1_700_000_000_000), None] {
+            let activity = AgentActivity {
+                sequence: 11,
+                changed_at_ms,
+            };
+            let mut value = legacy_agent_info();
+            value["activity"] = serde_json::to_value(&activity).unwrap();
+            let agent: AgentInfo = serde_json::from_value(value).unwrap();
+            assert_eq!(agent.activity, Some(activity));
+            assert_eq!(
+                serde_json::from_value::<AgentInfo>(serde_json::to_value(&agent).unwrap()).unwrap(),
+                agent
+            );
+        }
+    }
+
+    #[test]
+    fn agent_info_schema_keeps_activity_optional() {
+        let schema = serde_json::to_value(schemars::schema_for!(AgentInfo)).unwrap();
+        assert!(schema["properties"].get("activity").is_some());
+        assert!(!schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("activity")));
+    }
 }

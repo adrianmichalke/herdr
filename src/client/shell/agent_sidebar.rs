@@ -20,6 +20,7 @@ pub(super) struct AgentRow {
 pub(super) fn ordered_agent_pane_ids(
     snapshot: &ClientShellSnapshot,
     sort: crate::config::AgentPanelSortConfig,
+    recency: Option<&HashMap<String, u64>>,
 ) -> Vec<String> {
     if snapshot.agent_view_label.is_some() {
         return snapshot
@@ -39,7 +40,9 @@ pub(super) fn ordered_agent_pane_ids(
         agents.sort_by_key(|agent| {
             (
                 std::cmp::Reverse(status_priority(agent.agent_status)),
-                std::cmp::Reverse(agent.state_change_seq),
+                std::cmp::Reverse(recency.map_or(agent.state_change_seq, |recency| {
+                    recency.get(&agent.pane_id).copied().unwrap_or_default()
+                })),
             )
         });
     }
@@ -54,6 +57,7 @@ pub(super) fn render_agent_panel(
     area: Rect,
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
+    recency: Option<&HashMap<String, u64>>,
     agent_scroll: &mut usize,
     hits: &mut ShellHitMap,
 ) {
@@ -67,7 +71,7 @@ pub(super) fn render_agent_panel(
         return;
     }
 
-    let rows = agent_rows(snapshot, config, None);
+    let rows = agent_rows(snapshot, config, None, recency);
     render_agent_list(
         buffer,
         area,
@@ -238,8 +242,9 @@ pub(super) fn agent_rows(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     machine: Option<&str>,
+    recency: Option<&HashMap<String, u64>>,
 ) -> Vec<AgentRow> {
-    ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
+    ordered_agent_pane_ids(snapshot, config.agent_panel_sort, recency)
         .into_iter()
         .filter_map(|pane_id| agent_row(snapshot, &pane_id, config, machine))
         .collect()

@@ -9,6 +9,7 @@ pub(super) struct EndpointAgentPresentation {
     acknowledged: HashMap<String, u64>,
     completed: HashMap<String, u64>,
     working: HashSet<String>,
+    activity_times: HashMap<String, (u64, Option<String>)>,
     pending_completions: Option<(
         Option<u64>,
         crate::protocol::endpoint::EndpointAgentCompletions,
@@ -37,14 +38,14 @@ impl EndpointAgentPresentation {
 
     #[cfg(test)]
     pub(super) fn project_snapshot(&mut self, snapshot: &mut ClientShellSnapshot) {
-        self.project_snapshot_for_generation(snapshot, None);
+        let _ = self.project_snapshot_for_generation(snapshot, None);
     }
 
     pub(super) fn project_snapshot_for_generation(
         &mut self,
         snapshot: &mut ClientShellSnapshot,
         generation: Option<u64>,
-    ) {
+    ) -> Option<crate::protocol::endpoint::EndpointAgentCompletions> {
         if self.boot_id.as_deref() != Some(snapshot.boot_id.as_str()) {
             self.boot_id = Some(snapshot.boot_id.clone());
             self.acknowledged.clear();
@@ -68,7 +69,7 @@ impl EndpointAgentPresentation {
             .retain(|pane_id, _| pane_ids.contains(pane_id.as_str()));
         self.working
             .retain(|pane_id| pane_ids.contains(pane_id.as_str()));
-        let completions = self
+        let projection = self
             .pending_completions
             .take()
             .filter(|(received_generation, projection)| {
@@ -76,7 +77,11 @@ impl EndpointAgentPresentation {
                     && projection.boot_id == snapshot.boot_id
                     && projection.revision == snapshot.revision
             })
-            .map(|(_, projection)| projection.completions);
+            .map(|(_, projection)| projection);
+        let completions = projection
+            .as_ref()
+            .map(|projection| &projection.completions);
+        self.project_activity_times(snapshot, projection.as_ref());
         for agent in &mut snapshot.agents {
             match agent.agent_status {
                 AgentStatus::Working => {
@@ -113,6 +118,44 @@ impl EndpointAgentPresentation {
             agent.agent_status = self.projected_status(agent);
         }
         project_aggregate_status(snapshot);
+        projection
+    }
+
+    fn project_activity_times(
+        &mut self,
+        snapshot: &mut ClientShellSnapshot,
+        projection: Option<&crate::protocol::endpoint::EndpointAgentCompletions>,
+    ) {
+        let activity = projection.and_then(|projection| projection.activity.as_ref());
+        let panes = snapshot
+            .panes
+            .iter()
+            .map(|pane| pane.pane_id.as_str())
+            .chain(snapshot.agents.iter().map(|agent| agent.pane_id.as_str()))
+            .collect::<HashSet<_>>();
+        self.activity_times
+            .retain(|pane_id, _| panes.contains(pane_id.as_str()));
+        let key = crate::config::AgentSidebarToken::ACTIVITY_TIME_CACHE_KEY;
+        for agent in &mut snapshot.agents {
+            agent.tokens.retain(|(name, _)| name != key);
+            let timestamp = activity
+                .and_then(|activity| activity.get(&agent.pane_id))
+                .and_then(Option::as_ref)
+                .and_then(|activity| activity.changed_at_ms);
+            let Some(timestamp) = timestamp else {
+                continue;
+            };
+            let cached = self
+                .activity_times
+                .entry(agent.pane_id.clone())
+                .or_insert_with(|| (timestamp, activity_time(timestamp)));
+            if cached.0 != timestamp {
+                *cached = (timestamp, activity_time(timestamp));
+            }
+            if let Some(formatted) = cached.1.as_ref() {
+                agent.tokens.push((key.to_owned(), formatted.clone()));
+            }
+        }
     }
 
     pub(super) fn acknowledge_surface(
@@ -173,6 +216,16 @@ impl EndpointAgentPresentation {
             status => status,
         }
     }
+}
+
+fn activity_time(timestamp_ms: u64) -> Option<String> {
+    let local = crate::platform::local_datetime_at(timestamp_ms / 1_000)?;
+    Some(format!(
+        "{:02}:{:02}:{:02}",
+        local.hour(),
+        local.minute(),
+        local.second()
+    ))
 }
 
 fn project_aggregate_status(snapshot: &mut ClientShellSnapshot) {
@@ -296,6 +349,7 @@ mod tests {
 
     fn completions(boot: &str, revision: u64, seq: Option<u64>) -> EndpointAgentCompletions {
         EndpointAgentCompletions {
+            activity: None,
             boot_id: boot.into(),
             revision,
             completions: seq
@@ -303,6 +357,143 @@ mod tests {
                 .into_iter()
                 .collect(),
         }
+    }
+
+    #[test]
+    fn matching_activity_companion_is_returned_and_formats_cached_local_time() {
+        let mut presentation = EndpointAgentPresentation::default();
+        let mut companion = completions("endpoint-boot", 1, None);
+        let timestamp = 1_700_000_000_123;
+        companion.activity = Some(std::collections::BTreeMap::from([(
+            "agent-pane".into(),
+            Some(crate::agent_activity::AgentActivity {
+                sequence: 99,
+                changed_at_ms: Some(timestamp),
+            }),
+        )]));
+        presentation.receive_completions(Some(3), companion.clone());
+        let mut projected = snapshot(AgentStatus::Idle, 1, 1);
+        let returned = presentation.project_snapshot_for_generation(&mut projected, Some(3));
+        assert_eq!(returned, Some(companion));
+        let key = crate::config::AgentSidebarToken::ACTIVITY_TIME_CACHE_KEY;
+        let expected = activity_time(timestamp);
+        assert_eq!(
+            projected.agents[0]
+                .tokens
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value),
+            expected.as_ref()
+        );
+        assert_eq!(
+            presentation.activity_times["agent-pane"],
+            (timestamp, expected)
+        );
+        assert_eq!(projected.agents[0].state_change_seq, 1);
+        assert_eq!(projected.agents[0].agent_status, AgentStatus::Idle);
+    }
+
+    #[test]
+    fn activity_timestamp_requires_matching_boot_revision_and_generation() {
+        for (boot, revision, generation) in [
+            ("old-boot", 1, Some(1)),
+            ("endpoint-boot", 2, Some(1)),
+            ("endpoint-boot", 1, Some(2)),
+        ] {
+            let mut presentation = EndpointAgentPresentation::default();
+            let mut companion = completions(boot, revision, None);
+            companion.activity = Some(std::collections::BTreeMap::from([(
+                "agent-pane".into(),
+                Some(crate::agent_activity::AgentActivity {
+                    sequence: 4,
+                    changed_at_ms: Some(1_700_000_000_000),
+                }),
+            )]));
+            presentation.receive_completions(generation, companion);
+            let mut projected = snapshot(AgentStatus::Idle, 1, 1);
+            assert!(presentation
+                .project_snapshot_for_generation(&mut projected, Some(1))
+                .is_none());
+            assert!(projected.agents[0].tokens.is_empty());
+        }
+    }
+
+    #[test]
+    fn missing_malformed_and_out_of_range_timestamps_do_not_invent_times() {
+        for activity in [
+            serde_json::json!({}),
+            serde_json::json!({"agent-pane": null}),
+            serde_json::json!({"agent-pane": {"sequence": 4}}),
+            serde_json::json!({"agent-pane": {"sequence": 4, "changed_at_ms": "invalid"}}),
+            serde_json::json!({"agent-pane": {"sequence": 4, "changed_at_ms": u64::MAX}}),
+        ] {
+            let mut presentation = EndpointAgentPresentation::default();
+            let companion = serde_json::from_value(serde_json::json!({
+                "boot_id": "endpoint-boot",
+                "revision": 1,
+                "completions": {},
+                "activity": activity,
+            }))
+            .expect("tolerant optional activity");
+            presentation.receive_completions(None, companion);
+            let mut projected = snapshot(AgentStatus::Idle, 1, 1);
+            let companion = presentation
+                .project_snapshot_for_generation(&mut projected, None)
+                .unwrap();
+            assert!(companion.activity.is_some());
+            assert!(projected.agents[0].tokens.is_empty());
+        }
+        assert!(activity_time(u64::MAX).is_none());
+    }
+
+    #[test]
+    fn authoritative_activity_replaces_spoofed_tokens_and_legacy_omits_unknown_time() {
+        let key = crate::config::AgentSidebarToken::ACTIVITY_TIME_CACHE_KEY;
+        let mut presentation = EndpointAgentPresentation::default();
+        let mut projected = snapshot(AgentStatus::Idle, 1, 1);
+        projected.agents[0].tokens = vec![
+            (key.into(), "spoofed".into()),
+            (key.into(), "another spoof".into()),
+            ("activity_time".into(), "custom value".into()),
+        ];
+        presentation.project_snapshot(&mut projected);
+        assert_eq!(
+            projected.agents[0].tokens,
+            [("activity_time".into(), "custom value".into())]
+        );
+        let mut companion = completions("endpoint-boot", 2, None);
+        let timestamp = 1_700_000_000_000;
+        companion.activity = Some(std::collections::BTreeMap::from([(
+            "agent-pane".into(),
+            Some(crate::agent_activity::AgentActivity {
+                sequence: 1,
+                changed_at_ms: Some(timestamp),
+            }),
+        )]));
+        presentation.receive_completions(None, companion);
+        projected.revision = 2;
+        projected.agents[0]
+            .tokens
+            .push((key.into(), "spoofed".into()));
+        presentation.project_snapshot(&mut projected);
+        assert_eq!(
+            projected.agents[0]
+                .tokens
+                .iter()
+                .filter(|(name, _)| name == key)
+                .count(),
+            usize::from(activity_time(timestamp).is_some())
+        );
+        assert!(!projected.agents[0]
+            .tokens
+            .iter()
+            .any(|(_, value)| value == "spoofed"));
+        projected.revision = 3;
+        presentation.project_snapshot(&mut projected);
+        assert!(!projected.agents[0]
+            .tokens
+            .iter()
+            .any(|(name, _)| name == key));
     }
 
     #[test]
@@ -386,11 +577,11 @@ mod tests {
         ] {
             let mut presentation = EndpointAgentPresentation::default();
             let mut baseline = snapshot(AgentStatus::Idle, 4, 1);
-            presentation.project_snapshot_for_generation(&mut baseline, Some(1));
+            let _ = presentation.project_snapshot_for_generation(&mut baseline, Some(1));
             presentation.receive_completions(generation, completions(boot, revision, Some(seq)));
             let mut settled = snapshot(AgentStatus::Idle, 6, 2);
 
-            presentation.project_snapshot_for_generation(&mut settled, Some(1));
+            let _ = presentation.project_snapshot_for_generation(&mut settled, Some(1));
 
             assert_eq!(settled.agents[0].agent_status, AgentStatus::Idle);
         }

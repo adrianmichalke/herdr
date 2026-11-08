@@ -603,6 +603,67 @@ fn print_surface_reuse_profiles() {
     }
 }
 
+fn profile_agent_activity(count: usize, enabled: bool) -> (StageStats, StageStats) {
+    let mut pipeline = RenderPipeline::new(workspaces(count));
+    pipeline.app.state.ensure_test_terminals();
+    for (index, terminal) in pipeline.app.state.terminals.values_mut().enumerate() {
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Pi),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.last_agent_state_change_seq = Some(index as u64 + 1);
+        terminal.agent_activity = enabled.then_some(crate::agent_activity::AgentActivity {
+            sequence: index as u64 + 1,
+            changed_at_ms: Some(1_700_000_000_000 + index as u64),
+        });
+    }
+    let (snapshot, mut projection) =
+        super::client_shell::snapshot_with_completions(&pipeline.app, "bench-boot", 1, None, None);
+    if !enabled {
+        projection.activity = None;
+    }
+    let endpoint = crate::client::endpoint::ClientEndpointId::Local;
+    let mut run = || {
+        let started = Instant::now();
+        pipeline
+            .client
+            .set_endpoint_agent_completions(&endpoint, 0, projection.clone());
+        pipeline.client.set_endpoint_snapshot_for_generation(
+            &endpoint,
+            0,
+            Box::new(snapshot.clone()),
+        );
+        let ingestion = started.elapsed();
+        let (_, composition) = pipeline.render_once();
+        (ingestion, composition)
+    };
+    for _ in 0..WARMUP_COUNT {
+        black_box(run());
+    }
+    let (ingestion, composition) = (0..SAMPLE_COUNT).map(|_| run()).unzip();
+    (summarize(ingestion), summarize(composition))
+}
+
+fn print_agent_activity_profiles() {
+    println!("cached agent activity metadata + sidebar composition");
+    println!("       panes  timestamp  ingest_us  compose_us  ingest_delta_us  compose_delta_us");
+    for count in [1, 15] {
+        let baseline = profile_agent_activity(count, false);
+        println!(
+            "  {count:>10}      false  {:>9}  {:>10}                0                 0",
+            baseline.0.median_us, baseline.1.median_us
+        );
+        let activity = profile_agent_activity(count, true);
+        println!(
+            "  {count:>10}       true  {:>9}  {:>10}  {:>15}  {:>16}",
+            activity.0.median_us,
+            activity.1.median_us,
+            activity.0.median_us as i128 - baseline.0.median_us as i128,
+            activity.1.median_us as i128 - baseline.1.median_us as i128
+        );
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "manual client-rendered pipeline scaling profile"]
 async fn render_scale_profile() {
@@ -611,6 +672,7 @@ async fn render_scale_profile() {
     print_profiles("active panes (one workspace)", active_panes);
     print_snapshot_encoding_profiles("active panes", active_panes);
     print_token_rule_profiles();
+    print_agent_activity_profiles();
     print_surface_reuse_profiles();
     print_surface_damage_profiles();
 }

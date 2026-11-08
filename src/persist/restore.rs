@@ -440,6 +440,34 @@ fn restore_workspace(
     )
 }
 
+fn restore_agent_activity_for_pane(
+    terminal: &mut TerminalState,
+    pane: Option<&super::snapshot::PaneSnapshot>,
+    imported: bool,
+) {
+    let saved = pane.and_then(|pane| pane.agent_activity.as_ref());
+    let baseline = if imported {
+        saved
+            .and_then(|saved| {
+                saved
+                    .agent
+                    .as_ref()
+                    .map(|agent| (agent.clone(), saved.state))
+            })
+            .or_else(|| {
+                terminal
+                    .effective_agent_label()
+                    .map(|agent| (agent.to_owned(), terminal.state))
+            })
+    } else {
+        terminal
+            .pending_agent_resume_plan
+            .as_ref()
+            .map(|plan| (plan.agent.clone(), crate::detect::AgentState::Idle))
+    };
+    terminal.restore_agent_activity(saved, baseline);
+}
+
 fn unavailable_restored_terminal(
     pane: Option<&super::snapshot::PaneSnapshot>,
     cwd: PathBuf,
@@ -468,6 +496,7 @@ fn unavailable_restored_terminal(
             _ => {}
         }
     }
+    restore_agent_activity_for_pane(&mut terminal, pane, false);
     terminal
 }
 
@@ -620,6 +649,7 @@ fn restore_tab(
                     std::time::Instant::now(),
                 );
             }
+            restore_agent_activity_for_pane(&mut terminal, saved_pane, false);
             panes.insert(*id, PaneState::new(terminal_id));
             terminals.push(terminal);
             continue;
@@ -726,6 +756,7 @@ fn restore_tab(
                 if let Some(agent_state) = handoff_agent_state {
                     terminal.restore_handoff_agent_state(agent_state);
                 }
+                restore_agent_activity_for_pane(&mut terminal, saved_pane, was_imported);
                 panes.insert(*id, PaneState::new(terminal_id.clone()));
                 terminal_runtimes.insert(terminal_id, runtime);
                 terminals.push(terminal);
@@ -1477,7 +1508,8 @@ mod tests {
                 Arc::new(RenderSignal::new()),
             );
             let runtimes = crate::terminal::TerminalRuntimeRegistry::from(runtimes);
-            let captured = crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0);
+            let captured =
+                crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0, 0);
             assert_eq!(
                 captured.workspaces.len(),
                 2,
@@ -1527,6 +1559,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            agent_activity_sequence: None,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("workspace".into()),
                 custom_name: None,
@@ -1542,6 +1575,7 @@ mod tests {
                     panes: HashMap::from([(
                         0,
                         super::super::snapshot::PaneSnapshot {
+                            agent_activity: None,
                             cwd,
                             label: Some("reviewer".into()),
                             agent_name: Some("reviewer".into()),
@@ -1608,6 +1642,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            agent_activity_sequence: None,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("w1".into()),
                 custom_name: None,
@@ -1629,6 +1664,7 @@ mod tests {
                         (
                             10,
                             super::super::snapshot::PaneSnapshot {
+                                agent_activity: None,
                                 cwd: cwd.clone(),
                                 label: None,
                                 agent_name: None,
@@ -1641,6 +1677,7 @@ mod tests {
                         (
                             20,
                             super::super::snapshot::PaneSnapshot {
+                                agent_activity: None,
                                 cwd: cwd.clone(),
                                 label: None,
                                 agent_name: None,
@@ -1695,6 +1732,7 @@ mod tests {
             (
                 id.parse::<u32>().unwrap(),
                 super::super::snapshot::PaneSnapshot {
+                    agent_activity: None,
                     cwd: cwd.clone(),
                     label: None,
                     agent_name: None,
@@ -1706,6 +1744,7 @@ mod tests {
             )
         };
         let final_pane = super::super::snapshot::PaneSnapshot {
+            agent_activity: None,
             cwd: cwd.clone(),
             label: Some("planner".into()),
             agent_name: Some("planner".into()),
@@ -1721,6 +1760,7 @@ mod tests {
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            agent_activity_sequence: None,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("w1".into()),
                 custom_name: None,
@@ -1843,6 +1883,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            agent_activity_sequence: None,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("workspace".into()),
                 custom_name: None,
@@ -1858,6 +1899,7 @@ mod tests {
                     panes: HashMap::from([(
                         0,
                         super::super::snapshot::PaneSnapshot {
+                            agent_activity: None,
                             cwd,
                             label: None,
                             agent_name: None,
@@ -1984,8 +2026,14 @@ mod tests {
                 Some(1),
             );
             assert_eq!(terminal.state, state_before_handoff);
+            terminal.agent_activity = Some(crate::agent_activity::AgentActivity {
+                sequence: 44,
+                changed_at_ms: Some(1_000),
+            });
             let runtimes = crate::terminal::TerminalRuntimeRegistry::from(runtimes);
-            let snapshot = crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0);
+            let snapshot =
+                crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0, 88);
+            assert_eq!(snapshot.agent_activity_sequence, Some(88));
             let pane_id = workspaces[0].tabs[0].panes.keys().next().copied().unwrap();
             let runtime = runtimes.values().next().unwrap();
             runtime
@@ -2015,6 +2063,11 @@ mod tests {
             drop(restored_runtimes);
             drop(runtimes);
             let terminal = restored_terminals.values_mut().next().unwrap();
+            assert_eq!(terminal.agent_activity.as_ref().unwrap().sequence, 44);
+            assert_eq!(
+                terminal.agent_activity.as_ref().unwrap().changed_at_ms,
+                Some(1_000)
+            );
             assert_eq!(terminal.state, state_before_handoff);
             terminal.set_detected_state(Some(crate::detect::Agent::Pi), AgentState::Idle);
             assert_eq!(
@@ -2169,6 +2222,7 @@ mod tests {
         panes.insert(
             0,
             super::super::snapshot::PaneSnapshot {
+                agent_activity: None,
                 cwd: cwd.clone(),
                 label: None,
                 agent_name: None,
@@ -2199,6 +2253,7 @@ mod tests {
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            agent_activity_sequence: None,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("workspace".into()),
                 custom_name: None,

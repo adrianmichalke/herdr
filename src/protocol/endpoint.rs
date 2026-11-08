@@ -8,9 +8,12 @@
 //! new enum values need an `Unknown` fallback. Unknown named controls are
 //! optional and ignored unless negotiated as part of the core.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use super::{ClientShellSnapshot, ClientSurfaceSize, ServerMessage};
+use crate::agent_activity::AgentActivity;
 
 pub const ENDPOINT_PROTOCOL_GENERATION: u32 = 1;
 pub const ENDPOINT_HELLO_KIND: &str = "endpoint.hello.v1";
@@ -30,13 +33,42 @@ pub const HEALTH_PONG_KIND: &str = "endpoint.health.pong.v1";
 pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
 pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
 pub const AGENT_COMPLETIONS_CAPABILITY: &str = "agent_completions";
+pub const AGENT_ACTIVITY_CAPABILITY: &str = "agent_activity";
 pub const AGENT_COMPLETIONS_KIND: &str = "endpoint.agent-completions.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointAgentCompletions {
     pub boot_id: String,
     pub revision: u64,
-    pub completions: std::collections::BTreeMap<String, u64>,
+    pub completions: BTreeMap<String, u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_agent_activity_map"
+    )]
+    pub activity: Option<BTreeMap<String, Option<AgentActivity>>>,
+}
+
+fn deserialize_agent_activity_map<'de, D>(
+    deserializer: D,
+) -> Result<Option<BTreeMap<String, Option<AgentActivity>>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let serde_json::Value::Object(entries) = value else {
+        return Ok(None);
+    };
+    Ok(Some(
+        entries
+            .into_iter()
+            .filter_map(|(id, value)| {
+                serde_json::from_value(value)
+                    .ok()
+                    .map(|activity| (id, activity))
+            })
+            .collect(),
+    ))
 }
 
 fn default_true() -> bool {
@@ -174,6 +206,7 @@ impl EndpointServerWelcome {
                 HEALTH_CHECK_CAPABILITY.into(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.into(),
                 AGENT_COMPLETIONS_CAPABILITY.into(),
+                AGENT_ACTIVITY_CAPABILITY.into(),
             ],
             error: None,
         }
@@ -306,6 +339,88 @@ mod tests {
         assert_eq!(decoded, snapshot);
     }
 
+    fn legacy_agent_completions() -> serde_json::Value {
+        serde_json::json!({
+            "boot_id": "boot",
+            "revision": 7,
+            "completions": {"pane": 11}
+        })
+    }
+
+    #[test]
+    fn agent_completions_activity_is_optional_for_legacy_json() {
+        let legacy = legacy_agent_completions();
+        let projection: EndpointAgentCompletions = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(projection.activity, None);
+        assert_eq!(serde_json::to_value(projection).unwrap(), legacy);
+    }
+
+    #[test]
+    fn malformed_agent_activity_records_leave_other_records_and_completions_intact() {
+        let mut value = legacy_agent_completions();
+        value["activity"] = serde_json::json!({
+            "pane": {"sequence": 13, "changed_at_ms": 1_700_000_000_000u64},
+            "untimed": {"sequence": 14},
+            "unknown": null,
+            "not_a_record": "unsupported",
+            "missing_sequence": {"changed_at_ms": 1},
+            "negative_sequence": {"sequence": -1},
+            "fractional_sequence": {"sequence": 1.5},
+            "null_sequence": {"sequence": null},
+            "string_sequence": {"sequence": "15"},
+            "negative_timestamp": {"sequence": 16, "changed_at_ms": -1},
+            "string_timestamp": {"sequence": 17, "changed_at_ms": "unknown"}
+        });
+        let mut expected: EndpointAgentCompletions =
+            serde_json::from_value(legacy_agent_completions()).unwrap();
+        expected.activity = Some(
+            [
+                (
+                    "pane".into(),
+                    Some(AgentActivity {
+                        sequence: 13,
+                        changed_at_ms: Some(1_700_000_000_000),
+                    }),
+                ),
+                (
+                    "untimed".into(),
+                    Some(AgentActivity {
+                        sequence: 14,
+                        changed_at_ms: None,
+                    }),
+                ),
+                ("unknown".into(), None),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let projection: EndpointAgentCompletions = serde_json::from_value(value).unwrap();
+        assert_eq!(projection, expected);
+    }
+
+    #[test]
+    fn empty_activity_maps_remain_present_after_invalid_records_are_omitted() {
+        for activity in [serde_json::json!({}), serde_json::json!({"pane": false})] {
+            let mut value = legacy_agent_completions();
+            value["activity"] = activity;
+            let projection: EndpointAgentCompletions = serde_json::from_value(value).unwrap();
+            assert_eq!(projection.activity, Some(BTreeMap::new()));
+        }
+    }
+
+    #[test]
+    fn activity_does_not_default_required_completion_metadata() {
+        for field in ["boot_id", "revision", "completions"] {
+            let mut value = legacy_agent_completions();
+            value.as_object_mut().unwrap().remove(field);
+            value["activity"] = serde_json::json!({"pane": null});
+            assert!(
+                serde_json::from_value::<EndpointAgentCompletions>(value).is_err(),
+                "missing {field} must not be accepted"
+            );
+        }
+    }
+
     #[test]
     fn agent_view_projection_is_an_optional_revision_bound_control() {
         let view = crate::api::schema::AgentViewSetParams {
@@ -385,6 +500,7 @@ mod tests {
                 HEALTH_CHECK_CAPABILITY.to_string(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.to_string(),
                 AGENT_COMPLETIONS_CAPABILITY.to_string(),
+                AGENT_ACTIVITY_CAPABILITY.to_string(),
             ]
         );
     }

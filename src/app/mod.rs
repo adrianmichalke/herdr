@@ -403,6 +403,7 @@ impl App {
 
         // Try to restore previous session
         let mut restored_terminals = std::collections::HashMap::new();
+        let mut restored_activity_sequence = 0;
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         let snapshot = policy.restore_session.then(crate::persist::load).flatten();
         let mut plugin_installation_leases = crate::plugin_installations::Leases::new();
@@ -426,6 +427,7 @@ impl App {
             policy.restore_session && snapshot.is_none(),
         )));
         let (workspaces, active, selected) = if let Some(snap) = snapshot {
+            restored_activity_sequence = snap.agent_activity_sequence.unwrap_or_default();
             let history = config
                 .experimental
                 .pane_history
@@ -537,6 +539,7 @@ impl App {
             sidebar_agents: config.ui.sidebar.agents.clone(),
             sidebar_spaces: config.ui.sidebar.spaces.clone(),
             next_agent_state_change_seq: 0,
+            next_agent_activity_seq: restored_activity_sequence,
             confirm_close: config.ui.confirm_close,
             pane_borders: config.ui.pane_borders,
             pane_outer_borders: config.ui.pane_outer_borders,
@@ -690,6 +693,7 @@ impl App {
             client_shell_keybindings_profile,
             endpoint_commands,
         };
+        app.state.sync_agent_activity_high_water();
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
         app.refresh_restored_workspace_git_metadata();
@@ -737,6 +741,8 @@ impl App {
         app.state.pane_id_aliases = pane_id_aliases;
         app.state.workspaces = workspaces;
         app.state.terminals = terminals;
+        app.state.next_agent_activity_seq = snapshot.agent_activity_sequence.unwrap_or_default();
+        app.state.sync_agent_activity_high_water();
         app.terminal_runtimes = runtimes.into();
         app.state.active = snapshot
             .active
@@ -3176,6 +3182,11 @@ mod tests {
 
         assert!(!app.state.session_dirty);
         assert!(app.session_save_deadline.is_some());
+        let bounded = Instant::now() + Duration::from_secs(1);
+        app.session_save_deadline = Some(bounded);
+        app.state.session_dirty = true;
+        app.sync_session_save_schedule();
+        assert_eq!(app.session_save_deadline, Some(bounded));
     }
 
     #[test]

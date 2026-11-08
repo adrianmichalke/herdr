@@ -6540,8 +6540,39 @@
     },
     "success_response": {
       "$defs": {
+        "AgentActivity": {
+          "properties": {
+            "changed_at_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "sequence": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "sequence"
+          ],
+          "type": "object"
+        },
         "AgentInfo": {
           "properties": {
+            "activity": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentActivity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "agent": {
               "type": [
                 "string",

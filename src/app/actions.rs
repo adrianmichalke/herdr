@@ -10,7 +10,7 @@ use crate::events::AppEvent;
 use crate::layout::PaneId;
 #[cfg(test)]
 use crate::layout::{find_in_direction, NavDirection};
-use crate::terminal::{EffectiveStateChange, TerminalStateMutation};
+use crate::terminal::{ActivityObservation, EffectiveStateChange, TerminalStateMutation};
 use crate::workspace::WorkspaceGitStatus;
 
 use super::api_helpers::pane_agent_status;
@@ -1455,9 +1455,12 @@ impl AppState {
                 agent,
                 observed_at,
             } => self
-                .update_terminal_state(pane_id, |terminal| {
-                    Some(terminal.set_detected_agent_process_at(agent, observed_at))
-                })
+                .update_terminal_state_observed(
+                    pane_id,
+                    false,
+                    ActivityObservation::ProcessDiscovery,
+                    |terminal| Some(terminal.set_detected_agent_process_at(agent, observed_at)),
+                )
                 .into_iter()
                 .collect(),
             AppEvent::CodexPromptObserved { pane_id, ready } => self
@@ -1475,17 +1478,24 @@ impl AppState {
                 process_exited,
                 observed_at,
             } => self
-                .update_terminal_state(pane_id, |terminal| {
-                    Some(terminal.set_detected_state_with_screen_signals_at(
-                        agent,
-                        state,
-                        visible_blocker,
-                        false,
-                        visible_working,
-                        process_exited,
-                        observed_at,
-                    ))
-                })
+                .update_terminal_state_observed(
+                    pane_id,
+                    false,
+                    ActivityObservation::Screen {
+                        has_agent: agent.is_some(),
+                    },
+                    |terminal| {
+                        Some(terminal.set_detected_state_with_screen_signals_at(
+                            agent,
+                            state,
+                            visible_blocker,
+                            false,
+                            visible_working,
+                            process_exited,
+                            observed_at,
+                        ))
+                    },
+                )
                 .into_iter()
                 .collect(),
             AppEvent::HookStateReported {
@@ -1504,16 +1514,21 @@ impl AppState {
                     .into_iter()
                     .collect()
                 } else {
-                    self.update_terminal_state(pane_id, |terminal| {
-                        terminal.set_hook_authority_with_session_ref(
-                            source,
-                            agent_label,
-                            state,
-                            message,
-                            session_ref,
-                            seq,
-                        )
-                    })
+                    self.update_terminal_state_observed(
+                        pane_id,
+                        false,
+                        ActivityObservation::Reported,
+                        |terminal| {
+                            terminal.set_hook_authority_with_session_ref(
+                                source,
+                                agent_label,
+                                state,
+                                message,
+                                session_ref,
+                                seq,
+                            )
+                        },
+                    )
                     .into_iter()
                     .collect()
                 }
@@ -1688,6 +1703,24 @@ impl AppState {
     where
         F: FnOnce(&mut crate::terminal::TerminalState) -> Option<TerminalStateMutation>,
     {
+        self.update_terminal_state_observed(
+            pane_id,
+            force_suppress_completion,
+            ActivityObservation::Other,
+            update,
+        )
+    }
+
+    fn update_terminal_state_observed<F>(
+        &mut self,
+        pane_id: PaneId,
+        force_suppress_completion: bool,
+        observation: ActivityObservation,
+        update: F,
+    ) -> Option<PaneStateUpdate>
+    where
+        F: FnOnce(&mut crate::terminal::TerminalState) -> Option<TerminalStateMutation>,
+    {
         let ws_idx = self
             .workspaces
             .iter()
@@ -1705,6 +1738,7 @@ impl AppState {
             unchanged_change,
             suppress_acquisition_completion,
             completion_reset,
+            activity_changed,
         ) = {
             let terminal = self.terminals.get_mut(&terminal_id)?;
             let previous_agent_name = terminal.agent_name.clone();
@@ -1717,6 +1751,8 @@ impl AppState {
                 self.session_dirty = true;
             }
             let mutation = mutation?;
+            let activity_changed = terminal
+                .observe_agent_activity(observation, mutation.effective_state_change.as_ref());
             let completion_reset = mutation.session_ref_changed
                 || mutation
                     .effective_state_change
@@ -1730,6 +1766,7 @@ impl AppState {
             let agent_name_changed = terminal.agent_name != previous_agent_name;
             let unchanged_change = (mutation.agent_released
                 || agent_name_changed
+                || activity_changed
                 || (completion_reset && had_completion))
                 .then(|| terminal.unchanged_effective_state_change_at(now));
             (
@@ -1739,6 +1776,7 @@ impl AppState {
                 unchanged_change,
                 suppress_acquisition_completion,
                 completion_reset,
+                activity_changed,
             )
         };
         if completion_reset {
@@ -1746,6 +1784,13 @@ impl AppState {
             self.workspaces[ws_idx].pane_state_mut(pane_id)?.seen = true;
         }
         if mutation.session_ref_changed || managed_changed || agent_name_changed {
+            self.mark_session_dirty();
+        }
+        if activity_changed {
+            self.next_agent_activity_seq = self.next_agent_activity_seq.saturating_add(1);
+            if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
+                terminal.record_agent_activity(self.next_agent_activity_seq);
+            }
             self.mark_session_dirty();
         }
         let agent_released = mutation.agent_released;
@@ -1789,6 +1834,21 @@ impl AppState {
             suppress_completion,
         };
         Some(update)
+    }
+
+    pub(crate) fn sync_agent_activity_high_water(&mut self) {
+        self.next_agent_activity_seq = self.next_agent_activity_seq.max(
+            self.terminals
+                .values()
+                .filter_map(|terminal| {
+                    terminal
+                        .agent_activity
+                        .as_ref()
+                        .map(|activity| activity.sequence)
+                })
+                .max()
+                .unwrap_or_default(),
+        );
     }
 
     pub(crate) fn next_managed_agent_deadline(&self) -> Option<Instant> {
@@ -3669,6 +3729,127 @@ mod tests {
             .attached_terminal_id
             .clone();
         (pane_id, terminal_id)
+    }
+
+    fn report_activity_state(
+        state: &mut AppState,
+        pane_id: PaneId,
+        agent_state: AgentState,
+        sequence: u64,
+    ) {
+        state.handle_app_event(AppEvent::HookStateReported {
+            pane_id,
+            source: "test:activity".into(),
+            agent_label: "pi".into(),
+            state: agent_state,
+            message: None,
+            seq: Some(sequence),
+            session_ref: None,
+        });
+    }
+
+    #[test]
+    fn agent_activity_uses_existing_state_changes_not_heartbeats() {
+        let mut state = app_with_workspaces(&["one"]);
+        let (pane_id, terminal_id) = first_pane_terminal(&state);
+        report_activity_state(&mut state, pane_id, AgentState::Working, 1);
+        let first = state.terminals[&terminal_id]
+            .agent_activity
+            .clone()
+            .unwrap();
+        assert_eq!(first.sequence, 1);
+        assert!(first.changed_at_ms.is_some());
+        state.session_dirty = false;
+        report_activity_state(&mut state, pane_id, AgentState::Working, 2);
+        assert_eq!(
+            state.terminals[&terminal_id].agent_activity.as_ref(),
+            Some(&first)
+        );
+        assert!(!state.session_dirty);
+        report_activity_state(&mut state, pane_id, AgentState::Idle, 3);
+        assert_eq!(
+            state.terminals[&terminal_id]
+                .agent_activity
+                .as_ref()
+                .unwrap()
+                .sequence,
+            2
+        );
+        assert!(state.session_dirty);
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn agent_activity_survives_restore_initialization_then_advances_on_work() {
+        let mut state = app_with_workspaces(&["one"]);
+        let (pane_id, terminal_id) = first_pane_terminal(&state);
+        let saved = crate::agent_activity::SavedAgentActivity {
+            activity: Some(crate::agent_activity::AgentActivity {
+                sequence: 70,
+                changed_at_ms: Some(1_000),
+            }),
+            state: AgentState::Working,
+            agent: Some("pi".into()),
+        };
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        terminal.restore_agent_activity(Some(&saved), Some(("pi".into(), AgentState::Idle)));
+        state.sync_agent_activity_high_water();
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: None,
+            state: AgentState::Unknown,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        state.handle_app_event(AppEvent::AgentProcessDetected {
+            pane_id,
+            agent: Agent::Pi,
+            observed_at: std::time::Instant::now(),
+        });
+        report_activity_state(&mut state, pane_id, AgentState::Idle, 1);
+        assert_eq!(state.terminals[&terminal_id].agent_activity, saved.activity);
+        assert!(state.terminals[&terminal_id]
+            .last_agent_completion_seq
+            .is_none());
+        report_activity_state(&mut state, pane_id, AgentState::Working, 2);
+        assert_eq!(
+            state.terminals[&terminal_id]
+                .agent_activity
+                .as_ref()
+                .unwrap()
+                .sequence,
+            71
+        );
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn agent_activity_does_not_swallow_first_work_and_handles_exhausted_counter() {
+        let mut state = app_with_workspaces(&["one"]);
+        let (pane_id, terminal_id) = first_pane_terminal(&state);
+        let saved = crate::agent_activity::SavedAgentActivity {
+            activity: Some(crate::agent_activity::AgentActivity {
+                sequence: u64::MAX,
+                changed_at_ms: None,
+            }),
+            state: AgentState::Idle,
+            agent: Some("pi".into()),
+        };
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        terminal.restore_agent_activity(Some(&saved), Some(("pi".into(), AgentState::Idle)));
+        state.sync_agent_activity_high_water();
+        report_activity_state(&mut state, pane_id, AgentState::Working, 1);
+        let activity = state.terminals[&terminal_id]
+            .agent_activity
+            .as_ref()
+            .unwrap();
+        assert_eq!(activity.sequence, u64::MAX);
+        assert!(activity.changed_at_ms.is_some());
+        state.assert_invariants_for_test();
     }
 
     #[test]

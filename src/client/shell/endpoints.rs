@@ -21,6 +21,7 @@ pub(crate) struct ClientShellEndpoint {
     pub(crate) agent_view_projection: Option<ClientEndpointAgentViewProjection>,
     pending_agent_view_projection: Option<ClientEndpointAgentViewProjection>,
     pub(crate) agent_view_projection_supported: bool,
+    pub(crate) agent_activity_supported: bool,
     pub(crate) methods: Option<HashSet<String>>,
 }
 
@@ -63,7 +64,7 @@ impl ClientShellState {
                     profile.enabled && endpoint.status != ClientEndpointStatus::Disabled
                 });
             next.push(ClientShellEndpoint {
-                endpoint_id,
+                endpoint_id: endpoint_id.clone(),
                 label: profile.label.clone(),
                 status: previous.map_or(
                     if profile.enabled {
@@ -75,9 +76,7 @@ impl ClientShellState {
                 ),
                 snapshot: previous.and_then(|endpoint| endpoint.snapshot.clone()),
                 snapshot_generation: previous.and_then(|endpoint| endpoint.snapshot_generation),
-                agent_recency: previous
-                    .map(|endpoint| endpoint.agent_recency.clone())
-                    .unwrap_or_default(),
+                agent_recency: self.agent_recency.ranks(&endpoint_id),
                 agent_presentation: previous
                     .map(|endpoint| endpoint.agent_presentation.clone())
                     .unwrap_or_default(),
@@ -87,6 +86,8 @@ impl ClientShellState {
                     .and_then(|endpoint| endpoint.pending_agent_view_projection.clone()),
                 agent_view_projection_supported: previous
                     .is_some_and(|endpoint| endpoint.agent_view_projection_supported),
+                agent_activity_supported: previous
+                    .is_some_and(|endpoint| endpoint.agent_activity_supported),
                 methods: previous.and_then(|endpoint| endpoint.methods.clone()),
             });
         }
@@ -102,6 +103,12 @@ impl ClientShellState {
                 .any(|endpoint| &endpoint.endpoint_id == endpoint_id)
         });
         self.endpoints = next;
+        self.agent_recency.retain_endpoints(
+            self.endpoints
+                .iter()
+                .map(|endpoint| endpoint.endpoint_id.storage_key()),
+            std::time::Instant::now(),
+        );
     }
 
     pub(crate) fn select_unavailable_local(&mut self) {
@@ -133,6 +140,7 @@ impl ClientShellState {
             endpoint.agent_view_projection = None;
             endpoint.pending_agent_view_projection = None;
             endpoint.agent_view_projection_supported = false;
+            endpoint.agent_activity_supported = false;
         }
     }
 
@@ -187,6 +195,20 @@ impl ClientShellState {
                 endpoint.agent_view_projection = None;
                 endpoint.pending_agent_view_projection = None;
             }
+        }
+    }
+
+    pub(crate) fn set_endpoint_agent_activity_supported(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        supported: bool,
+    ) {
+        if let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        {
+            endpoint.agent_activity_supported = supported;
         }
     }
 
@@ -574,7 +596,8 @@ impl ClientShellState {
         if boot_changed {
             self.retire_endpoint_notifications(endpoint_id);
         }
-        self.endpoints[index]
+        super::agent_recency::order_snapshot_agents(&mut snapshot);
+        let activity_projection = self.endpoints[index]
             .agent_presentation
             .project_snapshot_for_generation(&mut snapshot, generation);
         let presented_surface = if acknowledge_surface && endpoint_id == &self.active_endpoint_id {
@@ -587,37 +610,24 @@ impl ClientShellState {
                 .agent_presentation
                 .acknowledge_surface(&mut snapshot, surface, self.outer_focused);
         }
-        let previous = self.endpoints[index].snapshot.as_deref();
-        let mut next_recency = self
-            .endpoints
-            .iter()
-            .flat_map(|endpoint| endpoint.agent_recency.values())
-            .copied()
-            .max()
-            .unwrap_or_default();
-        let mut agents = snapshot.agents.iter().collect::<Vec<_>>();
-        agents.sort_by_key(|agent| agent.state_change_seq);
-        let mut recency = self.endpoints[index].agent_recency.clone();
-        for agent in agents {
-            let changed = previous
-                .and_then(|snapshot| {
-                    snapshot
-                        .agents
-                        .iter()
-                        .find(|previous| previous.pane_id == agent.pane_id)
-                })
-                .is_none_or(|previous| previous.state_change_seq != agent.state_change_seq);
-            if changed {
-                next_recency = next_recency.saturating_add(1);
-                recency.insert(agent.pane_id.clone(), next_recency);
-            }
+        if activity_projection
+            .as_ref()
+            .is_some_and(|projection| projection.activity.is_some())
+        {
+            self.endpoints[index].agent_activity_supported = true;
         }
-        recency.retain(|pane_id, _| {
-            snapshot
-                .agents
-                .iter()
-                .any(|agent| &agent.pane_id == pane_id)
-        });
+        let empty_activity = std::collections::BTreeMap::new();
+        let activity = activity_projection
+            .as_ref()
+            .and_then(|projection| projection.activity.as_ref())
+            .or_else(|| {
+                self.endpoints[index]
+                    .agent_activity_supported
+                    .then_some(&empty_activity)
+            });
+        self.agent_recency
+            .observe(endpoint_id, &snapshot, activity, std::time::Instant::now());
+        let recency = self.agent_recency.ranks(endpoint_id);
         let endpoint = &mut self.endpoints[index];
         endpoint.agent_recency = recency;
         endpoint.snapshot_generation = generation;
@@ -741,6 +751,7 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
         agent_view_projection: None,
         pending_agent_view_projection: None,
         agent_view_projection_supported: false,
+        agent_activity_supported: false,
         methods: None,
     }
 }

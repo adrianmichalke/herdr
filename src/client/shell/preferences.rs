@@ -60,7 +60,7 @@ pub(super) fn load(path: &Path) -> Option<ClientChromePreferences> {
     serde_json::from_str(&content).ok()
 }
 
-pub(super) fn store(path: &Path, preferences: ClientChromePreferences) -> Result<(), String> {
+pub(super) fn store(path: &Path, preferences: impl Serialize) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("invalid client shell state path: {}", path.display()))?;
@@ -75,12 +75,24 @@ pub(super) fn store(path: &Path, preferences: ClientChromePreferences) -> Result
         .to_os_string();
     temp_name.push(format!(".tmp-{}-{sequence}", std::process::id()));
     let temp_path = parent.join(temp_name);
-    std::fs::write(&temp_path, content)
-        .map_err(|error| format!("failed to write client shell state: {error}"))?;
-    std::fs::rename(&temp_path, path).map_err(|error| {
+    let result = (|| {
+        use std::io::Write;
+
+        let mut file = crate::platform::create_private_state_file(&temp_path)
+            .map_err(|error| format!("failed to create client shell state: {error}"))?;
+        file.write_all(&content)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| format!("failed to write client shell state: {error}"))?;
+        drop(file);
+        crate::platform::replace_file(&temp_path, path)
+            .map_err(|error| format!("failed to replace client shell state: {error}"))?;
+        crate::platform::sync_parent_directory(parent)
+            .map_err(|error| format!("failed to sync client shell state: {error}"))
+    })();
+    if result.is_err() {
         let _ = std::fs::remove_file(&temp_path);
-        format!("failed to replace client shell state: {error}")
-    })
+    }
+    result
 }
 
 #[cfg(test)]

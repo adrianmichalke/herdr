@@ -11,6 +11,7 @@ const NESTED_HERDR_MESSAGES: [&str; 6] = [
     "recursion detected. base case not found. aborting.",
 ];
 
+mod agent_activity;
 mod agent_resume;
 mod agent_view_eval;
 mod api;
@@ -345,14 +346,14 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # accent = "cyan"
 
 # Expanded agent rows. Built-ins are state_icon, state_text, machine, workspace, tab,
-# pane, agent, terminal_title, and terminal_title_stripped.
+# pane, agent, activity_time, terminal_title, and terminal_title_stripped.
 # Custom values reported through pane metadata use a $name token.
 # A token occurrence may be styled with { token = "workspace", fg = "#89b4fa", bold = true, dim = false }.
 # Omitted style fields preserve the contextual default.
 # [ui.sidebar.agents]
 # Blank rows between agent entries. Set to 1 to restore the previous spacing.
 # row_gap = 0
-# rows = [["state_icon", "machine", "workspace", "tab"], ["agent"]]
+# rows = [["state_icon", "machine", "workspace", "tab"], ["agent", "activity_time"]]
 # Optional canonical agent IDs replace the default rows for matching agents.
 # [ui.sidebar.agents.rows_by_agent]
 # claude = [["state_icon", "machine", "workspace", "tab"], ["terminal_title_stripped"], ["agent"]]

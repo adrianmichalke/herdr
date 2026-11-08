@@ -77,7 +77,11 @@ pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry
                     entry.state,
                     entry.seen,
                 )),
-                std::cmp::Reverse(entry.last_agent_state_change_seq),
+                std::cmp::Reverse(
+                    entry
+                        .activity_sequence
+                        .or(entry.last_agent_state_change_seq),
+                ),
             )
         });
     }
@@ -393,6 +397,36 @@ mod tests {
             }),
             sort: Vec::new(),
         }
+    }
+
+    #[test]
+    fn priority_uses_durable_activity_without_reinterpreting_explicit_sequence_sorts() {
+        let mut state = state_with_agents();
+        state.agent_panel_sort = crate::app::state::AgentPanelSort::Priority;
+        for (index, sequence, durable) in [(0, 1, 50), (1, 100, 40)] {
+            let pane = state.workspaces[index].tabs[0].root_pane;
+            let terminal_id = state.workspaces[index].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.state = AgentState::Working;
+            terminal.last_agent_state_change_seq = Some(sequence);
+            terminal.agent_activity = Some(crate::agent_activity::AgentActivity {
+                sequence: durable,
+                changed_at_ms: None,
+            });
+        }
+        assert_eq!(projected_entries(&state)[0].ws_idx, 0);
+        state.agent_view_override = Some(AgentViewSetParams {
+            source: "test.activity".into(),
+            label: None,
+            filter: None,
+            sort: vec![AgentViewSort {
+                field: AgentViewSortField::Builtin(AgentViewBuiltinSortField::StateChangeSeq),
+                order: AgentViewSortOrder::Desc,
+            }],
+        });
+        assert_eq!(projected_entries(&state)[0].ws_idx, 1);
     }
 
     #[test]

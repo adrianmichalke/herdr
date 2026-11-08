@@ -192,6 +192,7 @@ mod tests {
     fn empty_snapshot() -> SessionSnapshot {
         SessionSnapshot {
             version: SNAPSHOT_VERSION,
+            agent_activity_sequence: None,
             workspaces: vec![],
             active: None,
             selected: 0,

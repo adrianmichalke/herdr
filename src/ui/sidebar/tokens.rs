@@ -97,6 +97,11 @@ pub(crate) fn agent_rows(
                         AgentSidebarToken::Agent => context
                             .agent_label
                             .map(|value| ResolvedTokenKind::Agent(value.to_string())),
+                        AgentSidebarToken::ActivityTime => context
+                            .tokens
+                            .get(AgentSidebarToken::ACTIVITY_TIME_CACHE_KEY)
+                            .cloned()
+                            .map(ResolvedTokenKind::Custom),
                         AgentSidebarToken::TerminalTitle => context
                             .terminal_title
                             .map(|value| ResolvedTokenKind::TerminalTitle(value.to_string())),
@@ -110,9 +115,12 @@ pub(crate) fn agent_rows(
                             .map(ResolvedTokenKind::Custom),
                         AgentSidebarToken::Styled { .. } => None,
                     }?;
-                    let style = kind
+                    let mut style = kind
                         .text_value()
                         .map_or(Some(style), |value| configured.style_for_value(value))?;
+                    if matches!(token, AgentSidebarToken::ActivityTime) {
+                        style.dim = style.dim.or(Some(true));
+                    }
                     Some(ResolvedToken::new(kind, style))
                 })
                 .collect::<Vec<_>>();
@@ -228,6 +236,93 @@ mod tests {
             canonical_agent: entry.canonical_agent,
             tokens: &entry.tokens,
         }
+    }
+
+    #[test]
+    fn activity_time_builtin_uses_only_the_client_cache_and_is_subdued() {
+        let config = AgentsSidebarConfig::default();
+        let mut entry = entry();
+        entry
+            .tokens
+            .insert("activity_time".into(), "spoofed".into());
+        let rows = agent_rows(&config, context(&entry), "idle");
+        assert_eq!(
+            rows[1],
+            [ResolvedToken::unstyled(ResolvedTokenKind::Agent(
+                "pi".into()
+            ))]
+        );
+        entry.tokens.insert(
+            AgentSidebarToken::ACTIVITY_TIME_CACHE_KEY.into(),
+            "12:34:56".into(),
+        );
+        let rows = agent_rows(&config, context(&entry), "idle");
+        assert_eq!(
+            rows[1][0],
+            ResolvedToken::unstyled(ResolvedTokenKind::Agent("pi".into()))
+        );
+        assert_eq!(
+            rows[1][1].kind,
+            ResolvedTokenKind::Custom("12:34:56".into())
+        );
+        assert_eq!(rows[1][1].style.dim, Some(true));
+    }
+
+    #[test]
+    fn activity_time_clips_safely_and_does_not_change_agent_label_rules() {
+        use ratatui::style::{Color, Modifier, Style};
+        let config: AgentsSidebarConfig = toml::from_str(r##"
+rows = [[{ token = "agent", rules = [{ equals = "pi", fg = "#f00", bold = true }] }, "activity_time"]]
+"##).unwrap();
+        let encoded = toml::to_string(&config).unwrap();
+        assert!(encoded.contains("activity_time"));
+        let config: AgentsSidebarConfig = toml::from_str(&encoded).unwrap();
+        let mut entry = entry();
+        entry.tokens.insert(
+            AgentSidebarToken::ACTIVITY_TIME_CACHE_KEY.into(),
+            "12:34:56".into(),
+        );
+        let rows = agent_rows(&config, context(&entry), "idle");
+        let theme = Style::default().fg(Color::Blue);
+        let palette = super::super::Palette::catppuccin();
+        for width in 0..40 {
+            let spans = super::super::resolved_token_spans(
+                &rows[0],
+                ("*", theme),
+                theme,
+                theme,
+                theme,
+                theme,
+                &palette,
+                width,
+            );
+            let text = spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            assert!(super::super::display_width(&text) <= width);
+        }
+        let spans = super::super::resolved_token_spans(
+            &rows[0],
+            ("*", theme),
+            theme,
+            theme,
+            theme,
+            theme,
+            &palette,
+            40,
+        );
+        let agent = spans.iter().find(|span| span.content == "pi").unwrap();
+        assert_eq!(agent.style.fg, Some(Color::Rgb(255, 0, 0)));
+        assert!(agent.style.add_modifier.contains(Modifier::BOLD));
+        assert!(!agent.style.add_modifier.contains(Modifier::DIM));
+        let timestamp = spans
+            .iter()
+            .find(|span| span.content == "12:34:56")
+            .unwrap();
+        assert_eq!(timestamp.style.fg, Some(Color::Blue));
+        assert!(timestamp.style.add_modifier.contains(Modifier::DIM));
+        assert!(!timestamp.style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]

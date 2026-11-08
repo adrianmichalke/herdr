@@ -893,6 +893,10 @@ impl ClientShellState {
                 let agents = super::agent_sidebar::ordered_agent_pane_ids(
                     snapshot,
                     self.config.agent_panel_sort,
+                    self.endpoints
+                        .iter()
+                        .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+                        .map(|endpoint| &endpoint.agent_recency),
                 );
                 Some(Method::PaneFocus(PaneTarget {
                     pane_id: agents.get(index)?.clone(),
@@ -902,6 +906,10 @@ impl ClientShellState {
                 let agents = super::agent_sidebar::ordered_agent_pane_ids(
                     snapshot,
                     self.config.agent_panel_sort,
+                    self.endpoints
+                        .iter()
+                        .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+                        .map(|endpoint| &endpoint.agent_recency),
                 );
                 if agents.is_empty() {
                     return None;

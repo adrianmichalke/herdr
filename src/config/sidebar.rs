@@ -113,6 +113,7 @@ pub enum AgentSidebarToken {
     Tab,
     Pane,
     Agent,
+    ActivityTime,
     TerminalTitle,
     TerminalTitleStripped,
     Custom(String),
@@ -139,6 +140,8 @@ pub enum SpaceSidebarToken {
 }
 
 impl AgentSidebarToken {
+    pub(crate) const ACTIVITY_TIME_CACHE_KEY: &'static str = "\0herdr.activity_time";
+
     pub(crate) fn style_for_value(&self, value: &str) -> Option<SidebarTokenStyle> {
         match self {
             Self::Styled { style, rules, .. } => rules::matching_style(rules, *style, value),
@@ -277,6 +280,7 @@ fn agent_token_name(token: &AgentSidebarToken) -> String {
         AgentSidebarToken::Tab => "tab".into(),
         AgentSidebarToken::Pane => "pane".into(),
         AgentSidebarToken::Agent => "agent".into(),
+        AgentSidebarToken::ActivityTime => "activity_time".into(),
         AgentSidebarToken::TerminalTitle => "terminal_title".into(),
         AgentSidebarToken::TerminalTitleStripped => "terminal_title_stripped".into(),
         AgentSidebarToken::Custom(name) => format!("${name}"),
@@ -336,6 +340,7 @@ impl<'de> Deserialize<'de> for AgentSidebarToken {
                 ("tab", Self::Tab),
                 ("pane", Self::Pane),
                 ("agent", Self::Agent),
+                ("activity_time", Self::ActivityTime),
                 ("terminal_title", Self::TerminalTitle),
                 ("terminal_title_stripped", Self::TerminalTitleStripped),
             ],
@@ -447,7 +452,7 @@ impl Default for AgentsSidebarConfig {
                     AgentSidebarToken::Workspace,
                     AgentSidebarToken::Tab,
                 ],
-                vec![AgentSidebarToken::Agent],
+                vec![AgentSidebarToken::Agent, AgentSidebarToken::ActivityTime],
             ],
             rows_by_agent: BTreeMap::new(),
             row_gap: DEFAULT_SIDEBAR_ROW_GAP,
@@ -498,7 +503,7 @@ mod tests {
                     AgentSidebarToken::Workspace,
                     AgentSidebarToken::Tab,
                 ],
-                vec![AgentSidebarToken::Agent],
+                vec![AgentSidebarToken::Agent, AgentSidebarToken::ActivityTime],
             ]
         );
         assert!(config.agents.rows_by_agent.is_empty());

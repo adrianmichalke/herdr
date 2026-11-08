@@ -516,6 +516,17 @@ async fn run_client_loop(
                     })
                 }),
         );
+        shell.set_endpoint_agent_activity_supported(
+            &endpoint::ClientEndpointId::Local,
+            initial
+                .as_ref()
+                .and_then(|(_, handshake)| handshake.endpoint_capabilities.as_ref())
+                .is_some_and(|capabilities| {
+                    capabilities.iter().any(|capability| {
+                        capability == crate::protocol::endpoint::AGENT_ACTIVITY_CAPABILITY
+                    })
+                }),
+        );
         if local_unavailable {
             shell.set_endpoint_status(
                 &endpoint::ClientEndpointId::Local,
@@ -839,6 +850,7 @@ async fn run_client_loop(
         let now = std::time::Instant::now();
         if let Some(shell) = state.shell.as_mut() {
             shell.tick_popup_pending(now);
+            shell.tick_agent_recency(now);
         }
 
         match event {
@@ -1387,8 +1399,14 @@ async fn run_client_loop(
                     let agent_view_projection_supported = negotiation.supports_capability(
                         crate::protocol::endpoint::AGENT_VIEW_PROJECTION_CAPABILITY,
                     );
+                    let agent_activity_supported = negotiation
+                        .supports_capability(crate::protocol::endpoint::AGENT_ACTIVITY_CAPABILITY);
                     let frame = state.shell.as_mut().and_then(|shell| {
                         shell.set_endpoint_methods_for(&endpoint_id, Some(negotiation.methods()));
+                        shell.set_endpoint_agent_activity_supported(
+                            &endpoint_id,
+                            agent_activity_supported,
+                        );
                         shell.set_endpoint_agent_view_projection_supported(
                             &endpoint_id,
                             agent_view_projection_supported,
@@ -2379,6 +2397,9 @@ async fn run_client_loop(
         }
     }
 
+    if let Some(shell) = state.shell.as_mut() {
+        shell.flush_agent_recency();
+    }
     // Clean exit (Ctrl+C). Send Detach before closing.
     let detach = ClientMessage::Detach;
     let _ = write_to_server(&mut write_stream, &detach);

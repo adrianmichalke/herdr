@@ -294,6 +294,11 @@ pub(super) fn render_shell(
                 snapshot,
                 config,
                 state
+                    .endpoints
+                    .iter()
+                    .find(|endpoint| endpoint.endpoint_id == *state.active_endpoint_id)
+                    .map(|endpoint| &endpoint.agent_recency),
+                state
                     .selected_workspace_id
                     .map(|target| target.workspace_id.as_str()),
                 &mut hits,

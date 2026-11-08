@@ -5,7 +5,7 @@ use ratatui::layout::Direction;
 use serde::{Deserialize, Serialize};
 
 use crate::layout::Node;
-use crate::terminal::TerminalRuntimeRegistry;
+use crate::terminal::{TerminalRuntimeRegistry, TerminalState};
 use crate::workspace::Workspace;
 
 /// Current snapshot format version.
@@ -17,6 +17,8 @@ pub struct SessionSnapshot {
     /// Format version — used to detect incompatible changes.
     #[serde(default)]
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_activity_sequence: Option<u64>,
     pub workspaces: Vec<WorkspaceSnapshot>,
     pub active: Option<usize>,
     pub selected: usize,
@@ -111,6 +113,8 @@ pub struct PaneSnapshot {
     pub agent_resume: Option<PaneAgentResumeSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_argv: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_activity: Option<crate::agent_activity::SavedAgentActivity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,6 +188,8 @@ struct RawSessionSnapshot {
     #[serde(default)]
     version: u32,
     #[serde(default)]
+    agent_activity_sequence: Option<u64>,
+    #[serde(default)]
     workspaces: Vec<serde_json::Value>,
     #[serde(default)]
     active: Option<usize>,
@@ -200,6 +206,7 @@ struct RawSessionSnapshot {
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
     Ok(SessionSnapshot {
         version: raw.version,
+        agent_activity_sequence: raw.agent_activity_sequence,
         workspaces: raw
             .workspaces
             .into_iter()
@@ -269,9 +276,11 @@ pub fn capture(
     terminal_runtimes: &TerminalRuntimeRegistry,
     active: Option<usize>,
     selected: usize,
+    agent_activity_sequence: u64,
 ) -> SessionSnapshot {
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
+        agent_activity_sequence: Some(agent_activity_sequence),
         workspaces: workspaces
             .iter()
             .map(|workspace| capture_workspace(workspace, terminals, terminal_runtimes))
@@ -388,6 +397,7 @@ fn capture_tab(
                 agent_session,
                 agent_resume,
                 launch_argv,
+                agent_activity: terminal.and_then(TerminalState::capture_agent_activity),
             },
         );
     }
@@ -576,6 +586,7 @@ mod tests {
             terminal_runtimes,
             state.active,
             state.selected,
+            state.next_agent_activity_seq,
         )
     }
 
@@ -657,6 +668,7 @@ mod tests {
     fn round_trip_empty_session() {
         let snap = SessionSnapshot {
             version: SNAPSHOT_VERSION,
+            agent_activity_sequence: None,
             workspaces: vec![],
             active: None,
             selected: 0,
@@ -700,6 +712,7 @@ mod tests {
         panes.insert(
             0,
             PaneSnapshot {
+                agent_activity: None,
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
                 label: None,
                 agent_name: None,
@@ -712,6 +725,7 @@ mod tests {
         panes.insert(
             1,
             PaneSnapshot {
+                agent_activity: None,
                 cwd: PathBuf::from("/home/can/Projects/website"),
                 label: Some("website".into()),
                 agent_name: None,
@@ -723,6 +737,7 @@ mod tests {
         );
 
         let snap = SessionSnapshot {
+            agent_activity_sequence: None,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("wproj".to_string()),
                 custom_name: Some("pi-mono".to_string()),
@@ -1306,6 +1321,85 @@ mod tests {
     }
 
     #[test]
+    fn activity_capture_follows_terminal_identity_in_adversarial_layouts() {
+        let mut state = AppState::test_with_adversarial_identity_state();
+        state.ensure_test_terminals();
+        for (index, terminal) in state.terminals.values_mut().enumerate() {
+            terminal.agent_activity = Some(crate::agent_activity::AgentActivity {
+                sequence: index as u64 + 1,
+                changed_at_ms: Some(index as u64 * 1_000),
+            });
+        }
+        state.sync_agent_activity_high_water();
+        state.assert_invariants_for_test();
+        let snapshot = capture_from_state(&state);
+        assert_eq!(
+            snapshot.agent_activity_sequence,
+            Some(state.next_agent_activity_seq)
+        );
+        for (workspace_index, workspace) in state.workspaces.iter().enumerate() {
+            for (tab_index, tab) in workspace.tabs.iter().enumerate() {
+                for (pane_id, pane) in &tab.panes {
+                    let expected = state.terminals[&pane.attached_terminal_id]
+                        .agent_activity
+                        .as_ref();
+                    let saved = snapshot.workspaces[workspace_index].tabs[tab_index].panes
+                        [&pane_id.raw()]
+                        .agent_activity
+                        .as_ref()
+                        .unwrap();
+                    assert_eq!(saved.activity.as_ref(), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn capture_contract_preserves_agent_activity_and_legacy_defaults() {
+        let mut state = state_with_workspaces(&["one"]);
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Pi),
+            crate::detect::AgentState::Working,
+        );
+        terminal.agent_activity = Some(crate::agent_activity::AgentActivity {
+            sequence: 70,
+            changed_at_ms: Some(1_700_000_000_000),
+        });
+        state.next_agent_activity_seq = 100;
+        let snapshot = capture_from_state(&state);
+        assert_eq!(snapshot.agent_activity_sequence, Some(100));
+        let saved = snapshot.workspaces[0].tabs[0].panes[&pane.raw()]
+            .agent_activity
+            .as_ref()
+            .unwrap();
+        assert_eq!(saved.activity.as_ref().unwrap().sequence, 70);
+        assert_eq!(saved.state, crate::detect::AgentState::Working);
+        assert_eq!(saved.agent.as_deref(), Some("pi"));
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        let decoded: SessionSnapshot = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            decoded.workspaces[0].tabs[0].panes[&pane.raw()]
+                .agent_activity
+                .as_ref(),
+            Some(saved)
+        );
+        let legacy: PaneSnapshot =
+            serde_json::from_value(serde_json::json!({"cwd": "/tmp"})).unwrap();
+        assert!(legacy.agent_activity.is_none());
+        assert!(!serde_json::to_value(&legacy)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("agent_activity"));
+    }
+
+    #[test]
     fn capture_contract_includes_reported_agent_resume() {
         let mut state = state_with_workspaces(&["one"]);
         let root = state.workspaces[0].tabs[0].root_pane;
@@ -1398,6 +1492,7 @@ mod tests {
         panes.insert(
             0,
             PaneSnapshot {
+                agent_activity: None,
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
                 label: None,
                 agent_name: None,
@@ -1410,6 +1505,7 @@ mod tests {
         panes.insert(
             1,
             PaneSnapshot {
+                agent_activity: None,
                 cwd: std::env::var("HOME")
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
@@ -1424,6 +1520,7 @@ mod tests {
 
         let snap = SessionSnapshot {
             version: SNAPSHOT_VERSION,
+            agent_activity_sequence: None,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("test-ws".to_string()),
                 custom_name: Some("fallback test".to_string()),

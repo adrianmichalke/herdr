@@ -89,6 +89,20 @@ mod tests {
             boot_id: "boot".into(),
             revision: 3,
             completions: [("pane".into(), 7)].into_iter().collect(),
+            activity: Some(
+                [
+                    (
+                        "pane".into(),
+                        Some(crate::agent_activity::AgentActivity {
+                            sequence: 11,
+                            changed_at_ms: Some(1_700_000_000_000),
+                        }),
+                    ),
+                    ("unknown".into(), None),
+                ]
+                .into_iter()
+                .collect(),
+            ),
         };
         let crate::protocol::ServerMessage::EndpointControl { kind, data } =
             crate::protocol::endpoint::agent_completions_message(&projection).unwrap()
@@ -105,6 +119,38 @@ mod tests {
             decode_endpoint_control(&kind, "invalid").unwrap(),
             EndpointControlMessage::Ignored
         ));
+    }
+
+    #[test]
+    fn completion_control_keeps_legacy_metadata_with_malformed_optional_activity() {
+        let expected = crate::protocol::endpoint::EndpointAgentCompletions {
+            boot_id: "boot".into(),
+            revision: 3,
+            completions: [("pane".into(), 7)].into_iter().collect(),
+            activity: None,
+        };
+        for activity in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!(true)),
+            Some(serde_json::json!(11)),
+            Some(serde_json::json!(1.5)),
+            Some(serde_json::json!("unsupported")),
+            Some(serde_json::json!([])),
+        ] {
+            let mut value = serde_json::to_value(&expected).unwrap();
+            if let Some(activity) = activity {
+                value["activity"] = activity;
+            }
+            let EndpointControlMessage::AgentCompletions(decoded) = decode_endpoint_control(
+                crate::protocol::endpoint::AGENT_COMPLETIONS_KIND,
+                &serde_json::to_string(&value).unwrap(),
+            )
+            .unwrap() else {
+                panic!("completion metadata must survive optional activity errors");
+            };
+            assert_eq!(decoded, expected);
+        }
     }
 
     #[test]

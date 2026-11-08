@@ -75,6 +75,7 @@ impl HeadlessServer {
             &self.app.terminal_runtimes,
             self.app.state.active,
             self.app.state.selected,
+            self.app.state.next_agent_activity_seq,
         );
 
         let mut handoff_entries = Vec::new();

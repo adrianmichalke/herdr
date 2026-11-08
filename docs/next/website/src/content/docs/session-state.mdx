@@ -28,7 +28,7 @@ This is the strongest persistence path because the original processes never stop
 
 ## Snapshot restore
 
-If the Herdr server stops and starts again, the original pane processes are gone. Herdr restores the saved session shape: workspaces, tabs, panes, cwd, layout, and focus.
+If the Herdr server stops and starts again, the original pane processes are gone. Herdr restores the saved session shape: workspaces, tabs, panes, cwd, layout, and focus. Saved agent activity timestamps and their durable sequence high-water also survive. The client separately retains observed sidebar recency ranks, so restoring an agent does not by itself make it the most recently active entry. Live priority/state changes still affect the order normally.
 
 Snapshot restore does not preserve running shells, servers, tests, or arbitrary processes. Panes that cannot use a stronger restore path come back as new shells in their saved directories.
 

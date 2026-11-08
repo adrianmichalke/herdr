@@ -359,6 +359,14 @@ status_indicators = "symbols"
 
 The symbols are static, so this option does not enable spinner animation.
 
+### Agent activity time and ordering
+
+The expanded agent entries show their last state-based activity time next to the agent label, in the client's local `HH:MM:SS` format. This uses the existing activity notion behind sidebar recency: accepted effective state changes, not terminal output, redraws, heartbeats, or focus acknowledgments.
+
+Herdr saves activity metadata with the session, and the client saves its observed recency ranks in a separate private cache beside its chrome preferences. Reconnecting, client restarts, server restore, and live handoff retain those ranks; synthetic restore initialization does not manufacture fresh activity. Priority still follows the existing status/attention rules, so a genuine priority or activity change can move an entry. Ordering does not compare machines' wall clocks.
+
+Older servers or saved sessions may have no historical timestamp. Missing or invalid times are omitted rather than invented. Both server and client need the new support: an existing compatible client can remain connected, but detach and reattach using the updated binary to see the timestamp.
+
 ### Sidebar row layouts
 
 The expanded desktop sidebar renders each inner array in `rows` as one line. These are the complete default layouts:
@@ -368,7 +376,7 @@ The expanded desktop sidebar renders each inner array in `rows` as one line. The
 row_gap = 0
 rows = [
   ["state_icon", "machine", "workspace", "tab"],
-  ["agent"],
+  ["agent", "activity_time"],
 ]
 
 [ui.sidebar.spaces]
@@ -388,6 +396,7 @@ Agent rows accept these built-in tokens:
 - `tab` — tab name when available.
 - `pane` — pane name when available.
 - `agent` — detected or reported agent display name.
+- `activity_time` — cached local time of the last state-based activity, subdued by default; omitted when unavailable. Add it explicitly to custom row layouts.
 - `terminal_title` — latest OSC 0/2 terminal title after safety normalization.
 - `terminal_title_stripped` — the terminal title with one recognized leading activity or spinner glyph and its following whitespace removed.
 - `$name` — custom pane metadata named `name`.

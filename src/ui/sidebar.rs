@@ -24,6 +24,7 @@ pub(crate) struct AgentPanelEntry {
     pub state: AgentState,
     pub seen: bool,
     pub last_agent_state_change_seq: Option<u64>,
+    pub activity_sequence: Option<u64>,
     pub tokens: std::collections::HashMap<String, String>,
 }
 
@@ -95,6 +96,7 @@ pub(crate) fn agent_panel_entries_from(
                     state: detail.state,
                     seen: detail.seen,
                     last_agent_state_change_seq: detail.last_agent_state_change_seq,
+                    activity_sequence: detail.activity_sequence,
                     tokens: detail.tokens,
                 })
         })

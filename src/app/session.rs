@@ -14,7 +14,8 @@ impl App {
     pub(super) fn schedule_session_save(&mut self) {
         if self.policy.persist_session {
             self.pane_exit_checkpoint_pending = false;
-            self.session_save_deadline = Some(Instant::now() + SESSION_SAVE_DEBOUNCE);
+            self.session_save_deadline
+                .get_or_insert(Instant::now() + SESSION_SAVE_DEBOUNCE);
         }
     }
 
@@ -47,6 +48,7 @@ impl App {
                 &self.terminal_runtimes,
                 self.state.active,
                 self.state.selected,
+                self.state.next_agent_activity_seq,
             );
             let history = self.persist_pane_history.then(|| {
                 crate::persist::capture_history(

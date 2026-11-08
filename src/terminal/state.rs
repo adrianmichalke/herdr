@@ -155,6 +155,8 @@ pub struct TerminalState {
     pub state: AgentState,
     pub last_agent_state_change_seq: Option<u64>,
     pub last_agent_completion_seq: Option<u64>,
+    pub agent_activity: Option<crate::agent_activity::AgentActivity>,
+    pub(super) activity_baseline: Option<super::activity::RestoredActivityBaseline>,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
@@ -195,6 +197,8 @@ impl TerminalState {
             state: AgentState::Unknown,
             last_agent_state_change_seq: None,
             last_agent_completion_seq: None,
+            agent_activity: None,
+            activity_baseline: None,
             revision: 0,
             launch_argv: None,
             respawn_shell_on_exit: false,
@@ -2338,6 +2342,8 @@ impl TerminalState {
         self.state = AgentState::Unknown;
         self.last_agent_state_change_seq = None;
         self.last_agent_completion_seq = None;
+        self.agent_activity = None;
+        self.activity_baseline = None;
         self.launch_argv = None;
         self.respawn_shell_on_exit = false;
         self.recent_agent_process_exit = None;

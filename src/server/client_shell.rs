@@ -33,6 +33,13 @@ pub(super) fn snapshot_with_completions(
             .iter()
             .filter_map(|agent| agent.completion_seq.map(|seq| (agent.pane_id.clone(), seq)))
             .collect(),
+        activity: Some(
+            snapshot
+                .agents
+                .iter()
+                .map(|agent| (agent.pane_id.clone(), agent.activity.clone()))
+                .collect(),
+        ),
     };
     let focused_workspace_id = location
         .and_then(|location| location.focused_workspace_id.clone())
@@ -656,6 +663,11 @@ mod tests {
                 terminal.agent_name = Some(format!("agent-{index}"));
                 terminal.last_agent_state_change_seq = Some(5);
                 terminal.last_agent_completion_seq = Some(7);
+                terminal.agent_activity =
+                    (index == 0).then_some(crate::agent_activity::AgentActivity {
+                        sequence: 11,
+                        changed_at_ms: Some(1_700_000_000_000),
+                    });
             }
             let runtime = crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
                 20,
@@ -670,6 +682,24 @@ mod tests {
         let metadata = app.session_metadata_snapshot();
         assert_eq!(metadata.panes.len(), 3);
         assert_eq!(metadata.agents.len(), 2);
+        assert_eq!(
+            metadata
+                .agents
+                .iter()
+                .filter(|agent| agent.activity.is_some())
+                .count(),
+            1
+        );
+        assert_eq!(
+            metadata
+                .agents
+                .iter()
+                .find_map(|agent| agent.activity.as_ref()),
+            Some(&crate::agent_activity::AgentActivity {
+                sequence: 11,
+                changed_at_ms: Some(1_700_000_000_000),
+            })
+        );
         assert!(metadata.panes.iter().all(|pane| pane.scroll.is_none()));
         assert!(app
             .terminal_runtimes
@@ -702,15 +732,34 @@ mod tests {
             assert_eq!(pane.tab_id, public_pane.tab_id);
             assert_eq!(pane.cwd, public_pane.cwd);
         }
+        let activity = completions.activity.as_ref().expect("activity projection");
+        assert_eq!(activity.len(), metadata.agents.len());
         for (agent, public_agent) in shell.agents.iter().zip(&metadata.agents) {
             assert_eq!(agent.pane_id, public_agent.pane_id);
             assert_eq!(agent.name, public_agent.name);
             assert_eq!(agent.agent_status, public_agent.agent_status);
             assert_eq!(agent.state_change_seq, 5);
+            assert_eq!(activity.get(&agent.pane_id), Some(&public_agent.activity));
         }
+        let value = serde_json::to_value(&completions).unwrap();
+        let unknown = metadata
+            .agents
+            .iter()
+            .find(|agent| agent.activity.is_none())
+            .unwrap();
+        assert_eq!(
+            value["activity"].get(&unknown.pane_id),
+            Some(&serde_json::Value::Null)
+        );
         assert_eq!(completions.revision, 9);
         assert_eq!(completions.completions.len(), 2);
         assert!(completions.completions.iter().all(|(_, seq)| *seq == 7));
+        for terminal in app.state.terminals.values_mut() {
+            terminal.last_agent_completion_seq = None;
+        }
+        let (_, without_completions) = snapshot_with_completions(&app, "boot", 10, None, None);
+        assert!(without_completions.completions.is_empty());
+        assert_eq!(without_completions.activity, completions.activity);
         assert!(app
             .terminal_runtimes
             .values()

@@ -566,11 +566,29 @@ pub(crate) fn local_datetime() -> Option<time::PrimitiveDateTime> {
     if unsafe { libc::time(&mut timestamp) } == -1 {
         return None;
     }
+    local_datetime_at(u64::try_from(timestamp).ok()?)
+}
+
+pub(crate) fn local_datetime_at(timestamp: u64) -> Option<time::PrimitiveDateTime> {
+    time::OffsetDateTime::from_unix_timestamp(i64::try_from(timestamp).ok()?).ok()?;
+    let timestamp: libc::time_t = timestamp.try_into().ok()?;
     let mut local: libc::tm = unsafe { std::mem::zeroed() };
     if unsafe { libc::localtime_r(&timestamp, &mut local) }.is_null() {
         return None;
     }
     datetime_from_tm(&local)
+}
+
+#[cfg(test)]
+mod datetime_tests {
+    #[test]
+    fn historical_local_datetime_uses_the_supplied_epoch_and_rejects_overflow() {
+        let local = super::local_datetime_at(1_700_000_000).expect("historical local time");
+        assert_eq!(local.year(), 2023);
+        assert_eq!(local.month(), time::Month::November);
+        assert!(matches!(local.day(), 14 | 15));
+        assert!(super::local_datetime_at(u64::MAX).is_none());
+    }
 }
 
 pub(crate) fn status_commands_supported() -> bool {
