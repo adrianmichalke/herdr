@@ -193,6 +193,7 @@ mod tests {
         SessionSnapshot {
             version: SNAPSHOT_VERSION,
             agent_activity_sequence: None,
+            pane_aliases: super::super::PaneAliasesSnapshot::default(),
             workspaces: vec![],
             active: None,
             selected: 0,

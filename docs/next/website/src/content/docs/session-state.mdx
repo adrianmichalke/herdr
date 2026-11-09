@@ -30,6 +30,18 @@ Live moves require compatible transfer support on both Unix servers. Unsupported
 
 Moved processes retain their original socket and pane environment. The source session forwards those inherited targets using reserved identity mappings, including after a source-server restart. Keep the source available while these processes use inherited hooks or CLI commands; do not delete and recreate that session while those inherited addresses are in use. After settlement the destination's saved space and history no longer depend on the source journal. There is no close-and-recreate fallback or cross-machine migration.
 
+## Move tabs between spaces
+
+Right-click a tab and choose **Move to space...** to move the entire live tab to another existing space in the current session. The source space is excluded from the picker, and the tab is appended after the destination's existing tabs. This action requires a server advertising `tab.move_to_workspace`; older servers keep their other tab actions.
+
+Panes keep their running agents, shells, terminal processes, layout, zoom, custom names, working directories, terminal history, metadata, and focused pane. Moving the active tab follows it in the initiating client only. Moving a background tab leaves that client's current view unchanged. Other spaces and existing destination tabs are not restarted or replaced.
+
+If the tab was its source space's last tab, Herdr creates a blank replacement there before moving it. The source space and any worktree group remain. Cancelling before submission changes nothing. Failed validation or replacement creation leaves the original tab in place; there is no close-and-recreate fallback. Once submitted, a move cannot be cancelled as if it had not happened. A timeout can leave its result unknown: check both spaces before retrying.
+
+The CLI equivalent is `herdr tab move-to-workspace <TAB_ID> --workspace <WORKSPACE_ID>`. It returns the moved tab's new canonical ID without changing focus. The existing `tab.move` API continues to mean reordering within one space.
+
+Moved panes can receive new public IDs. Pane-targeted commands and agent reports using their previous pane IDs keep reaching the same terminals, including across server handoffs. Running processes' workspace and tab environment variables are not rewritten; use the current IDs returned by the API for workspace- or tab-level commands. This action does not move tabs between sessions or machines.
+
 ## Live persistence
 
 Normal detach keeps the Herdr server running. Panes, shells, agents, servers, tests, and command processes keep running inside that server.

@@ -3071,6 +3071,8 @@ impl HeadlessServer {
                 | api::schema::Method::WorkspaceClose(_)
                 | api::schema::Method::PaneClose(_)
                 | api::schema::Method::TabClose(_)
+                | api::schema::Method::PaneMove(_)
+                | api::schema::Method::TabMoveToWorkspace(_)
                 | api::schema::Method::PaneReleaseAgent(_)
                 | api::schema::Method::PaneClearAgentAuthority(_)
         );

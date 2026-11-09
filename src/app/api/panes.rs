@@ -3442,10 +3442,7 @@ mod tests {
             Some(&source_terminal)
         );
         assert_eq!(app.parse_pane_id(&previous_pane_id), Some((0, source)));
-        assert!(matches!(
-            app.resolve_agent_target(&previous_pane_id),
-            Err(crate::app::terminal_targets::TerminalTargetError::NotFound { .. })
-        ));
+        assert!(app.resolve_agent_target(&previous_pane_id).is_ok());
         assert!(app.resolve_agent_target(&move_result.pane.pane_id).is_ok());
     }
 

@@ -90,6 +90,15 @@ impl ClientContextMenuOverlay {
         ) {
             items.push(item("Move to session...", Action::MoveToSession));
         }
+        if matches!(
+            &self.target,
+            ClientContextMenuTarget::Tab {
+                move_source: Some(_),
+                ..
+            }
+        ) {
+            items.push(item("Move to space...", Action::MoveToSpace));
+        }
         items
     }
 }
@@ -163,8 +172,9 @@ impl ClientShellState {
         };
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target: ClientContextMenuTarget::Tab {
-                tab_id,
+                tab_id: tab_id.clone(),
                 workspace_id: tab.workspace_id.clone(),
+                move_source: self.tab_move_source(&tab_id),
             },
             x,
             y,
@@ -249,7 +259,16 @@ impl ClientShellState {
             ClientContextMenuTarget::Tab {
                 tab_id,
                 workspace_id,
-            } => self.activate_tab_context_action(tab_id, workspace_id, action, outcome),
+                move_source,
+            } => {
+                if action == ClientContextMenuAction::MoveToSpace {
+                    if let Some(source) = move_source {
+                        self.open_tab_move_picker(source, outcome);
+                    }
+                } else {
+                    self.activate_tab_context_action(tab_id, workspace_id, action, outcome);
+                }
+            }
             ClientContextMenuTarget::Pane {
                 pane_id,
                 workspace_id,

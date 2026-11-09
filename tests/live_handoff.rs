@@ -1475,6 +1475,186 @@ fn live_handoff_accepts_canonical_pane_id_from_child_env() {
 }
 
 #[test]
+fn tab_move_preserves_multi_pane_processes_and_old_hooks_across_two_handoffs() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config = base.join("config");
+    let runtime = base.join("runtime");
+    let socket = config.join("herdr-dev/sessions/tab-move/herdr.sock");
+    let spawned = spawn_named_session_server(&config, &runtime, "tab-move");
+    wait_for_socket(&socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime);
+    let call = |method: &str, params: serde_json::Value| {
+        let response = request(
+            &socket,
+            serde_json::json!({"id":"tab-move-test","method":method,"params":params}),
+        );
+        assert!(response.get("error").is_none(), "{method}: {response}");
+        response["result"].clone()
+    };
+    let created = call(
+        "workspace.create",
+        serde_json::json!({"cwd":base,"label":"original","focus":true}),
+    );
+    let source_workspace = created["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let tab = created["tab"]["tab_id"].as_str().unwrap().to_owned();
+    let first = created["root_pane"]["pane_id"].as_str().unwrap().to_owned();
+    let split = call(
+        "pane.split",
+        serde_json::json!({"target_pane_id":first,"direction":"right","ratio":0.37,"focus":true}),
+    );
+    let second = split["pane"]["pane_id"].as_str().unwrap().to_owned();
+    let destination = call(
+        "workspace.create",
+        serde_json::json!({"cwd":base,"label":"destination","focus":true}),
+    );
+    let destination_workspace = destination["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let destination_pane = destination["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let destination_pid = call(
+        "pane.process_info",
+        serde_json::json!({"pane_id":destination_pane}),
+    )["process_info"]["shell_pid"]
+        .clone();
+    call(
+        "tab.rename",
+        serde_json::json!({"tab_id":tab,"label":"live named tab"}),
+    );
+    call(
+        "pane.zoom",
+        serde_json::json!({"pane_id":second,"mode":"on"}),
+    );
+    let panes = [first, second];
+    let mut before = Vec::new();
+    for (index, pane) in panes.iter().enumerate() {
+        let marker = base.join(format!("pane-{index}-env"));
+        call(
+            "pane.rename",
+            serde_json::json!({"pane_id":pane,"label":format!("named-{index}")}),
+        );
+        call(
+            "pane.send_input",
+            serde_json::json!({"pane_id":pane,"text":format!("printf '%s\\n' \"$HERDR_PANE_ID\" > {}; printf 'TAB-MOVE-LIVE-{index}\\n'; sleep 120",marker.display()),"keys":["Enter"]}),
+        );
+        assert_eq!(
+            wait_for_file_contains(&marker, pane, Duration::from_secs(5)).trim(),
+            pane
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let info = loop {
+            let info = call("pane.process_info", serde_json::json!({"pane_id":pane}))
+                ["process_info"]
+                .clone();
+            if info["foreground_processes"]
+                .as_array()
+                .is_some_and(|processes| processes.iter().any(|process| process["name"] == "sleep"))
+            {
+                break info;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "foreground job did not start: {info}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
+        let terminal =
+            call("pane.get", serde_json::json!({"pane_id":pane}))["pane"]["terminal_id"].clone();
+        before.push((
+            info["shell_pid"].clone(),
+            info["foreground_process_group_id"].clone(),
+            terminal,
+        ));
+        call(
+            "pane.report_agent",
+            serde_json::json!({"pane_id":pane,"source":"tab-move-live","agent":"smoke-bot","state":"working","seq":1}),
+        );
+        call(
+            "agent.rename",
+            serde_json::json!({"target":pane,"name":format!("live-{index}")}),
+        );
+    }
+    let moved = call(
+        "tab.move_to_workspace",
+        serde_json::json!({"tab_id":tab,"workspace_id":destination_workspace}),
+    );
+    assert_eq!(moved["tab"]["label"], "live named tab");
+    assert_eq!(moved["tab"]["pane_count"], 2);
+    assert_eq!(
+        call(
+            "tab.list",
+            serde_json::json!({"workspace_id":source_workspace})
+        )["tabs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        call(
+            "tab.list",
+            serde_json::json!({"workspace_id":destination_workspace})
+        )["tabs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let focused =
+        call("pane.get", serde_json::json!({"pane_id":panes[1]}))["pane"]["pane_id"].clone();
+    let layout = call("pane.layout", serde_json::json!({"pane_id":panes[0]}));
+    assert_eq!(layout["layout"]["zoomed"], true);
+    assert_eq!(layout["layout"]["focused_pane_id"], focused);
+    for round in 0..=2 {
+        if round > 0 {
+            call("server.live_handoff", serde_json::json!({}));
+            wait_for_api(&socket, Duration::from_secs(10));
+        }
+        for (index, pane) in panes.iter().enumerate() {
+            let info = call("pane.process_info", serde_json::json!({"pane_id":pane}));
+            let current = call("pane.get", serde_json::json!({"pane_id":pane}));
+            assert_eq!(info["process_info"]["shell_pid"], before[index].0);
+            assert_eq!(
+                info["process_info"]["foreground_process_group_id"],
+                before[index].1
+            );
+            assert_eq!(current["pane"]["terminal_id"], before[index].2);
+            assert_eq!(current["pane"]["label"], format!("named-{index}"));
+            assert_eq!(current["pane"]["workspace_id"], destination_workspace);
+            call(
+                "pane.report_agent",
+                serde_json::json!({"pane_id":pane,"source":"tab-move-live","agent":"smoke-bot","state":"working","seq":round + 2}),
+            );
+            assert_eq!(
+                call("agent.get", serde_json::json!({"target":pane}))["agent"]["terminal_id"],
+                before[index].2
+            );
+            wait_for_output(&socket, pane, &format!("TAB-MOVE-LIVE-{index}"));
+        }
+        assert_eq!(
+            call(
+                "pane.process_info",
+                serde_json::json!({"pane_id":destination_pane})
+            )["process_info"]["shell_pid"],
+            destination_pid
+        );
+    }
+    assert_ok(request(
+        &socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    ));
+    drop(spawned);
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
     use std::os::unix::fs::PermissionsExt;
 

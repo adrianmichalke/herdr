@@ -508,6 +508,18 @@ impl ClientShellState {
         let Some(pending) = self.pending_requests.remove(request_id) else {
             return (false, Vec::new());
         };
+        let kind = match pending.kind {
+            PendingEndpointKind::TabMove {
+                source,
+                workspace_id,
+            } => {
+                return self.complete_tab_move(boot_id, request_id, *source, workspace_id, result);
+            }
+            PendingEndpointKind::TabMoveFollow { source, tab_id } => {
+                return self.complete_tab_move_follow(boot_id, request_id, *source, tab_id, result);
+            }
+            kind => kind,
+        };
         if pending.boot_id != boot_id
             || self
                 .snapshot
@@ -516,7 +528,7 @@ impl ClientShellState {
         {
             return (false, Vec::new());
         }
-        if let PendingEndpointKind::PaneLinkResolve { target } = pending.kind {
+        if let PendingEndpointKind::PaneLinkResolve { target } = kind {
             return self.complete_link_hover(target, result);
         }
         if result.is_ok() {
@@ -569,8 +581,11 @@ impl ClientShellState {
                 self.push_endpoint_notice(kind, notice_code, title, body);
             }
         }
-        match pending.kind {
+        match kind {
             PendingEndpointKind::Generic => {}
+            PendingEndpointKind::TabMove { .. } | PendingEndpointKind::TabMoveFollow { .. } => {
+                unreachable!("handled above")
+            }
             PendingEndpointKind::PaneLinkResolve { .. } => unreachable!("handled above"),
             PendingEndpointKind::ProductAnnouncementDismiss { version, id } => {
                 return match result {

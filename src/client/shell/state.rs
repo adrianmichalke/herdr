@@ -128,6 +128,7 @@ pub(super) struct ShellHitMap {
     pub(super) navigator_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) worktree_search: Rect,
     pub(super) worktree_rows: Vec<(Rect, usize)>,
+    pub(super) tab_move_rows: Vec<(Rect, String)>,
     pub(super) help_popup: Rect,
     pub(super) help_scrollbar: Rect,
     pub(super) help_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -313,6 +314,7 @@ pub(super) enum ClientShellOverlayKind {
     GlobalMenu,
     Settings,
     SessionPicker,
+    TabMove,
 }
 
 #[derive(Debug)]
@@ -534,6 +536,7 @@ pub(super) struct ClientWorktreeRemoveOverlay {
 pub(super) enum ClientContextMenuAction {
     Sessions,
     MoveToSession,
+    MoveToSpace,
     Rename,
     Close,
     NewWorktree,
@@ -568,6 +571,7 @@ pub(super) enum ClientContextMenuTarget {
     Tab {
         tab_id: String,
         workspace_id: String,
+        move_source: Option<super::tab_move::TabMoveSource>,
     },
     Pane {
         pane_id: String,
@@ -623,6 +627,7 @@ pub(super) enum ClientShellOverlay {
     GlobalMenu(ClientGlobalMenuOverlay),
     Settings(ClientSettingsOverlay),
     SessionPicker(super::sessions::SessionPickerOverlay),
+    TabMove(super::tab_move::TabMovePicker),
 }
 
 impl ClientShellOverlay {
@@ -642,6 +647,7 @@ impl ClientShellOverlay {
             Self::GlobalMenu(_) => ClientShellOverlayKind::GlobalMenu,
             Self::Settings(_) => ClientShellOverlayKind::Settings,
             Self::SessionPicker(_) => ClientShellOverlayKind::SessionPicker,
+            Self::TabMove(_) => ClientShellOverlayKind::TabMove,
         }
     }
 }
@@ -649,6 +655,14 @@ impl ClientShellOverlay {
 #[derive(Debug)]
 pub(super) enum PendingEndpointKind {
     Generic,
+    TabMove {
+        source: Box<super::tab_move::TabMoveSource>,
+        workspace_id: String,
+    },
+    TabMoveFollow {
+        source: Box<super::tab_move::TabMoveSource>,
+        tab_id: String,
+    },
     ProductAnnouncementDismiss {
         version: String,
         id: String,
@@ -1439,7 +1453,16 @@ impl ClientShellState {
             let preview = (self.mode == ClientShellMode::Navigate)
                 .then(|| self.navigate_workspace_id.take())
                 .flatten();
+            let tab_move = if matches!(self.overlay, Some(ClientShellOverlay::TabMove(_))) {
+                self.interrupt_tab_move_picker();
+                self.overlay.take()
+            } else {
+                None
+            };
             self.reset_endpoint_projection();
+            if tab_move.is_some() {
+                self.overlay = tab_move;
+            }
             self.navigate_workspace_id = preview;
         } else if let Some(previous) = self
             .snapshot
@@ -1642,6 +1665,7 @@ impl ClientShellState {
             }
         }
         self.snapshot = Some(snapshot);
+        self.reconcile_tab_move_picker();
         self.reconcile_pending_workspace_highlight();
         let pending_surface = self.pending_pane_surface.take();
         if let Some(surface) = pending_surface {
@@ -1740,6 +1764,7 @@ impl ClientShellState {
                     ClientShellOverlay::Onboarding
                         | ClientShellOverlay::ProductAnnouncement(_)
                         | ClientShellOverlay::SessionPicker(_)
+                        | ClientShellOverlay::TabMove(_)
                 )
             ) {
                 self.overlay = self

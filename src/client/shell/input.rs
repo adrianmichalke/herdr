@@ -248,7 +248,12 @@ impl ClientShellState {
                 RawInputEvent::Text(text) => {
                     let text = text.into_string();
                     if self.insert_session_picker_text(&text)
-                        || matches!(self.overlay, Some(ClientShellOverlay::GlobalMenu(_)))
+                        || matches!(
+                            self.overlay,
+                            Some(
+                                ClientShellOverlay::GlobalMenu(_) | ClientShellOverlay::TabMove(_)
+                            )
+                        )
                     {
                         outcome.repaint = true;
                         self.reconcile_input_source();
@@ -288,7 +293,12 @@ impl ClientShellState {
                 }
                 RawInputEvent::Paste(text) => {
                     if self.insert_session_picker_text(&text)
-                        || matches!(self.overlay, Some(ClientShellOverlay::GlobalMenu(_)))
+                        || matches!(
+                            self.overlay,
+                            Some(
+                                ClientShellOverlay::GlobalMenu(_) | ClientShellOverlay::TabMove(_)
+                            )
+                        )
                     {
                         outcome.repaint = true;
                         self.reconcile_input_source();
@@ -646,7 +656,7 @@ impl ClientShellState {
             }
             return None;
         }
-        if self.route_session_picker_key(key, outcome) {
+        if self.route_tab_move_key(key, outcome) || self.route_session_picker_key(key, outcome) {
             return None;
         }
         if matches!(self.overlay, Some(ClientShellOverlay::GlobalMenu(_))) {
@@ -1133,6 +1143,7 @@ impl ClientShellState {
                     | ClientShellOverlay::ProductAnnouncement(_)
                     | ClientShellOverlay::ReleaseNotes(_)
                     | ClientShellOverlay::SessionPicker(_)
+                    | ClientShellOverlay::TabMove(_)
                     | ClientShellOverlay::GlobalMenu(_)
             )
         ) || self

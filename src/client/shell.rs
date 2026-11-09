@@ -37,6 +37,7 @@ pub(crate) use workspace_transfer::{WorkspaceTransferSource, WORKSPACE_TRANSFER_
 mod settings;
 mod state;
 mod surface_patch;
+mod tab_move;
 mod text_editor;
 mod word_selection;
 mod worktrees;

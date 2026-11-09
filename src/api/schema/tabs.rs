@@ -61,6 +61,19 @@ pub struct TabMoveParams {
     pub insert_index: usize,
 }
 
+cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct TabMoveToWorkspaceParams => TabMoveToWorkspaceProjection {
+        pub tab_id: String => Field::new(String::new()).input(tab_id()),
+        pub workspace_id: String => Field::new(String::new()).input(
+            Input::value("workspace", "WORKSPACE_ID", |slot, value| {
+                *slot = crate::cli::normalize_workspace_id(value);
+                Ok(())
+            }).required()
+        ),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TabInfo {
     pub tab_id: String,

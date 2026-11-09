@@ -624,6 +624,75 @@ fn workspace_transfer_can_return_to_an_origin_session_without_alias_cycles() {
 }
 
 #[test]
+fn tab_move_aliases_stay_with_the_live_pane_when_its_old_space_moves_to_another_session() {
+    let mut sessions = Sessions::without_graphics();
+    sessions.start("source");
+    sessions.start("target");
+    let source = sessions.path("source");
+    let target = sessions.path("target");
+    let moving = sessions.create("source", "tab origin");
+    let retained = sessions.create("source", "retained space");
+    let untouched = sessions.create("target", "existing destination");
+    let original_workspace = moving["workspace"]["workspace_id"].as_str().unwrap();
+    let original_pane = moving["root_pane"]["pane_id"].as_str().unwrap();
+    let tab_id = moving["tab"]["tab_id"].as_str().unwrap();
+    let retained_workspace = retained["workspace"]["workspace_id"].as_str().unwrap();
+    let untouched_pane = untouched["root_pane"]["pane_id"].as_str().unwrap();
+    let original_pid = pid(&source, original_pane);
+    let retained_pid = pid(&source, retained["root_pane"]["pane_id"].as_str().unwrap());
+    let untouched_pid = pid(&target, untouched_pane);
+    let moved = success(
+        &source,
+        "tab.move_to_workspace",
+        json!({"tab_id":tab_id,"workspace_id":retained_workspace}),
+    );
+    assert_eq!(moved["tab"]["workspace_id"], retained_workspace);
+    assert_eq!(pid(&source, original_pane), original_pid);
+    success(
+        &source,
+        "pane.report_agent",
+        json!({"pane_id":original_pane,"source":"tab-transfer-test","agent":"codex","state":"idle","seq":1}),
+    );
+    let exported = transfer(
+        &source,
+        original_workspace,
+        "21000000-0000-4000-8000-000000000008",
+    );
+    assert_eq!(exported["state"], "committed", "{exported}");
+    assert_eq!(pid(&source, original_pane), original_pid);
+    assert_eq!(
+        pid(&source, retained["root_pane"]["pane_id"].as_str().unwrap()),
+        retained_pid
+    );
+    success(
+        &source,
+        "pane.report_agent",
+        json!({"pane_id":original_pane,"source":"tab-transfer-test","agent":"codex","state":"working","seq":2}),
+    );
+    assert_eq!(
+        success(&source, "agent.get", json!({"target":original_pane}))["agent"]["terminal_id"],
+        moving["root_pane"]["terminal_id"],
+    );
+    send(&source, original_pane, "printf 'RETAINED-TAB-ALIAS\\n'");
+    wait_output(&source, original_pane, "RETAINED-TAB-ALIAS");
+    let owner_moved = transfer(
+        &source,
+        retained_workspace,
+        "21000000-0000-4000-8000-000000000009",
+    );
+    assert_eq!(owner_moved["state"], "committed", "{owner_moved}");
+    assert_eq!(pid(&source, original_pane), original_pid);
+    success(
+        &source,
+        "pane.report_agent",
+        json!({"pane_id":original_pane,"source":"tab-transfer-test","agent":"codex","state":"idle","seq":3}),
+    );
+    send(&source, original_pane, "printf 'EXPORTED-TAB-ALIAS\\n'");
+    wait_output(&source, original_pane, "EXPORTED-TAB-ALIAS");
+    assert_eq!(pid(&target, untouched_pane), untouched_pid);
+}
+
+#[test]
 fn workspace_transfer_default_empty_graphics_terminal_is_supported() {
     let mut sessions = Sessions::new();
     sessions.start("source");

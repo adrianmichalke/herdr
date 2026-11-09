@@ -333,7 +333,15 @@ impl HeadlessServer {
                 &workspace.id,
                 *number,
             ));
-            source_identities.insert(format!("p_{}", pane.raw()));
+            if self
+                .app
+                .state
+                .pane_id_aliases
+                .get(&pane.raw())
+                .is_none_or(|target| target == pane)
+            {
+                source_identities.insert(format!("p_{}", pane.raw()));
+            }
         }
         source_identities.extend(terminal_ids.iter().map(ToString::to_string));
         source_identities.extend(
@@ -341,7 +349,7 @@ impl HeadlessServer {
                 .state
                 .public_pane_id_aliases
                 .iter()
-                .filter(|(_, pane)| pane_ids.contains(pane))
+                .filter(|(_, pane)| pane_ids.contains(*pane))
                 .map(|(alias, _)| alias.clone()),
         );
         source_identities.extend(
@@ -349,7 +357,7 @@ impl HeadlessServer {
                 .state
                 .pane_id_aliases
                 .iter()
-                .filter(|(_, pane)| pane_ids.contains(pane))
+                .filter(|(_, pane)| pane_ids.contains(*pane))
                 .map(|(alias, _)| format!("p_{alias}")),
         );
         let source_names = self

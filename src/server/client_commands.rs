@@ -245,6 +245,20 @@ mod tests {
         )))
         .expect("endpoint method shape fixture");
         let mut actual = endpoint_method_shape_digests();
+        assert!(actual.remove("tab.move_to_workspace").is_some());
+        let mut tab_transfer = serde_json::to_value(schemars::schema_for!(
+            crate::api::schema::TabMoveToWorkspaceParams
+        ))
+        .expect("tab transfer schema");
+        tab_transfer.as_object_mut().unwrap().remove("$schema");
+        assert_eq!(
+            normalized_wire_schema(&tab_transfer),
+            serde_json::json!({
+                "type":"object",
+                "properties":{"tab_id":{"type":"string"},"workspace_id":{"type":"string"}},
+                "required":["tab_id","workspace_id"]
+            })
+        );
         // Freeze additive methods separately without rewriting the published fixture.
         assert_eq!(
             actual.remove("pane.clear").as_deref(),

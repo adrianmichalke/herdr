@@ -685,7 +685,11 @@ impl ClientShellState {
         let point = (mouse.column, mouse.row);
         if matches!(
             self.overlay,
-            Some(ClientShellOverlay::SessionPicker(_) | ClientShellOverlay::GlobalMenu(_))
+            Some(
+                ClientShellOverlay::SessionPicker(_)
+                    | ClientShellOverlay::TabMove(_)
+                    | ClientShellOverlay::GlobalMenu(_)
+            )
         ) && self
             .pane_mouse_gesture
             .as_ref()
@@ -697,7 +701,9 @@ impl ClientShellState {
             }
             return;
         }
-        if self.handle_session_picker_mouse(mouse, outcome) {
+        if self.handle_tab_move_mouse(mouse, outcome)
+            || self.handle_session_picker_mouse(mouse, outcome)
+        {
             return;
         }
         if self.overlay.is_none()

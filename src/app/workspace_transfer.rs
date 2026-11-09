@@ -246,12 +246,8 @@ impl App {
         impl FnOnce() -> std::io::Result<()> + Send + 'static,
         Option<PendingSessionSave>,
     ) {
-        let mut snapshot = crate::persist::capture(
-            &self.state.workspaces,
-            &self.state.terminals,
-            &self.terminal_runtimes,
-            self.state.active,
-            self.state.selected,
+        let mut snapshot = self.capture_session_snapshot();
+        snapshot.agent_activity_sequence = Some(
             self.state
                 .next_agent_activity_seq
                 .max(imported.next_agent_activity_seq),

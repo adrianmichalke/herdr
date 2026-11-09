@@ -483,7 +483,7 @@ impl ClientShellState {
     ) {
         use crossterm::event::KeyModifiers;
 
-        if self.route_session_picker_key(key, outcome) {
+        if self.route_tab_move_key(key, outcome) || self.route_session_picker_key(key, outcome) {
             return;
         }
         if matches!(self.overlay, Some(ClientShellOverlay::Onboarding)) {

@@ -234,6 +234,7 @@ impl HeadlessServer {
                 | Method::PaneSplit(_)
                 | Method::TabClose(_)
                 | Method::TabCreate(_)
+                | Method::TabMoveToWorkspace(_)
                 | Method::WorkspaceClose(_)
                 | Method::WorkspaceCreate(_)
                 | Method::WorktreeCreate(_)
@@ -270,6 +271,7 @@ impl HeadlessServer {
                 | Method::TabCreate(_)
                 | Method::TabFocus(_)
                 | Method::TabMove(_)
+                | Method::TabMoveToWorkspace(_)
                 | Method::TabRename(_)
                 | Method::WorkspaceClose(_)
                 | Method::WorkspaceCreate(_)
@@ -302,6 +304,7 @@ impl HeadlessServer {
                 | Method::TabClose(_)
                 | Method::TabCreate(_)
                 | Method::TabFocus(_)
+                | Method::TabMoveToWorkspace(_)
                 | Method::WorkspaceClose(_)
                 | Method::WorkspaceCreate(_)
                 | Method::WorkspaceFocus(_)
@@ -413,8 +416,10 @@ impl HeadlessServer {
         target: &ShellFocusTarget,
         event: crate::ghostty::FocusEvent,
     ) {
-        self.app
-            .send_pane_focus_event(target.workspace_index, target.pane_id, event);
+        if let Some((workspace_index, _)) = self.app.find_pane(target.pane_id) {
+            self.app
+                .send_pane_focus_event(workspace_index, target.pane_id, event);
+        }
     }
 
     fn shell_location_focus_transitions(

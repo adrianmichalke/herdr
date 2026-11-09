@@ -170,6 +170,7 @@ mod tests {
             "tab.focus",
             "tab.rename",
             "tab.move",
+            "tab.move_to_workspace",
             "tab.close",
             "layout.apply",
             "layout.set_split_ratio",
