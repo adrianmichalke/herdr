@@ -6,6 +6,8 @@ mod overlays;
 pub(in crate::client::shell) mod sidebar;
 #[path = "../shell/tabs.rs"]
 mod tabs;
+#[path = "../shell/wrapped_tabs.rs"]
+mod wrapped_tabs;
 
 pub(super) use super::agent_sidebar::{ordered_agent_pane_ids, render_agent_panel};
 pub(super) use super::aggregate_navigation::navigator_rows as client_navigator_rows;
@@ -14,7 +16,12 @@ pub(super) use overlays::{
     render_tab_move_overlay,
 };
 pub(super) use sidebar::{render_collapsed_sidebar, render_sidebar, workspace_entries};
-pub(super) use tabs::{render_tab_bar, tab_bar_status_width};
+pub(super) use tabs::{render_tab_bar, render_tab_drop_indicator, tab_bar_status_width};
+pub(super) use wrapped_tabs::wrapped_tab_bar_height;
+
+pub(super) fn compact_selector_width(width: u16) -> u16 {
+    width.min(24).min((width / 2).max(1))
+}
 
 pub(in crate::client::shell) fn render_sidebar_background(
     buffer: &mut Buffer,
@@ -246,7 +253,7 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) reveal_focused_tab: &'a mut bool,
     pub(super) sidebar_collapsed: bool,
     pub(super) sidebar_section_split: f32,
-    pub(super) tab_drag_insert_index: Option<usize>,
+    pub(super) tab_bar_occluded: bool,
     pub(super) selected_workspace_id: Option<&'a WorkspaceNavigationTarget>,
     pub(super) reveal_navigation_workspace: &'a mut bool,
     pub(super) dragged_workspace_id: Option<&'a str>,
@@ -335,14 +342,14 @@ pub(super) fn render_shell(
         Some(Rect::new(
             area.x,
             area.y,
-            area.width.min(24).min((area.width / 2).max(1)),
+            compact_selector_width(area.width),
             area.height.min(1),
         ))
     } else {
         None
     };
     if layout.tab_bar.height > 0 {
-        let tab_bar = if let Some(selector) = compact_selector {
+        let mut tab_bar = if let Some(selector) = compact_selector {
             Rect::new(
                 selector.right(),
                 layout.tab_bar.y,
@@ -352,6 +359,9 @@ pub(super) fn render_shell(
         } else {
             layout.tab_bar
         };
+        if state.tab_bar_occluded {
+            tab_bar.height = tab_bar.height.saturating_sub(1);
+        }
         render_tab_bar(
             buffer,
             tab_bar,
@@ -359,7 +369,6 @@ pub(super) fn render_shell(
             config,
             state.tab_scroll,
             state.reveal_focused_tab,
-            state.tab_drag_insert_index,
             &mut hits,
         );
     }

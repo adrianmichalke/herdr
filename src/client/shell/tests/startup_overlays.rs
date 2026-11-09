@@ -1196,9 +1196,17 @@ fn client_settings_preview_restore_and_endpoint_integrations_are_owned_by_overla
 
     state.open_settings_overlay();
     state.compose(106, 30).expect("settings overlay");
-    for _ in 0..3 {
+    for section in ClientSettingsSection::ALL
+        .iter()
+        .skip(1)
+        .take_while(|section| **section != ClientSettingsSection::Integrations)
+    {
         let next = state.handle_input_bytes(b"\t");
         assert!(next.actions.is_empty());
+        assert!(matches!(
+            state.overlay,
+            Some(ClientShellOverlay::Settings(ref settings)) if settings.section == *section
+        ));
     }
     let integrations = state.handle_input_bytes(b"\t");
     let [ClientShellAction::Endpoint { request, .. }] = &integrations.actions[..] else {

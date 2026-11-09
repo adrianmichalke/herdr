@@ -169,17 +169,19 @@ pub(super) fn install_endpoint_connection(
 }
 
 pub(super) fn client_shell_resize_message(
-    shell: &shell::ClientShellState,
+    shell: &mut shell::ClientShellState,
     cols: u16,
     rows: u16,
     cell_width_px: u32,
     cell_height_px: u32,
     pixel_mouse: bool,
 ) -> ClientMessage {
+    let surface_size = shell.surface_size(cols, rows);
+    shell.expect_pane_surface_size(surface_size);
     ClientMessage::ClientShellResize {
         cell_width_px,
         cell_height_px,
-        surface_size: shell.surface_size(cols, rows),
+        surface_size,
         pixel_mouse,
     }
 }
@@ -385,7 +387,8 @@ pub(super) fn begin_endpoint_activation(
         }
         return Ok(());
     }
-    let Some(shell) = state.shell.as_ref() else {
+    let pixel_mouse_available = state.pixel_mouse_available();
+    let Some(shell) = state.shell.as_mut() else {
         return Ok(());
     };
     let resize = client_shell_resize_message(
@@ -394,7 +397,7 @@ pub(super) fn begin_endpoint_activation(
         state.reported_size.1,
         state.reported_cell_size.0,
         state.reported_cell_size.1,
-        state.pixel_mouse_available(),
+        pixel_mouse_available,
     );
     match endpoint::PendingEndpointActivation::prepare(
         shell,
@@ -492,10 +495,12 @@ pub(super) fn complete_endpoint_activation(
     if matches!(
         completion,
         endpoint::ActivationCompletion::AwaitingPresentationSync { .. }
+            | endpoint::ActivationCompletion::AwaitingPresentationEffects
     ) {
         // The coherent target frame can replace the frozen source now, but the registry keeps
         // pane input disabled until a second projection epoch has replayed host modes/effects.
-        let resize = state.shell.as_ref().and_then(|shell| {
+        let pixel_mouse_available = state.pixel_mouse_available();
+        let resize = state.shell.as_mut().and_then(|shell| {
             pending
                 .as_ref()
                 .filter(|activation| {
@@ -509,7 +514,7 @@ pub(super) fn complete_endpoint_activation(
                         state.reported_size.1,
                         state.reported_cell_size.0,
                         state.reported_cell_size.1,
-                        state.pixel_mouse_available(),
+                        pixel_mouse_available,
                     )
                 })
         });
@@ -518,6 +523,9 @@ pub(super) fn complete_endpoint_activation(
                 rollback_endpoint_activation(state, endpoints, pending, error, false);
                 return Ok(None);
             }
+        }
+        if completion == endpoint::ActivationCompletion::AwaitingPresentationEffects {
+            return Ok(None);
         }
         state.unfreeze_presentation();
         let (cleanup, frame) = {
@@ -533,10 +541,6 @@ pub(super) fn complete_endpoint_activation(
         }
         return Ok(None);
     }
-    if completion == endpoint::ActivationCompletion::AwaitingPresentationEffects {
-        return Ok(None);
-    }
-
     if let Some(activation) = pending.take() {
         if activation.is_session_handoff() {
             let result = match &completion {
@@ -837,18 +841,19 @@ pub(super) fn install_client_shell_snapshot(
         }
         let graphics_cleanup = shell.take_pending_graphics_cleanup();
         let next_size = shell.surface_size(state.reported_size.0, state.reported_size.1);
+        let resize = (previous_size != next_size).then(|| {
+            client_shell_resize_message(
+                shell,
+                state.reported_size.0,
+                state.reported_size.1,
+                state.reported_cell_size.0,
+                state.reported_cell_size.1,
+                pixel_mouse_available,
+            )
+        });
         (
             shell.compose(state.reported_size.0, state.reported_size.1),
-            (previous_size != next_size).then(|| {
-                client_shell_resize_message(
-                    shell,
-                    state.reported_size.0,
-                    state.reported_size.1,
-                    state.reported_cell_size.0,
-                    state.reported_cell_size.1,
-                    pixel_mouse_available,
-                )
-            }),
+            resize,
             graphics_cleanup,
         )
     } else {
@@ -885,14 +890,15 @@ pub(super) fn finish_client_shell_input(
         return Ok(true);
     }
     if outcome.resize {
-        let shell = state.shell.as_ref().expect("shell mode remains active");
+        let pixel_mouse_available = state.pixel_mouse_available();
+        let shell = state.shell.as_mut().expect("shell mode remains active");
         let resize = client_shell_resize_message(
             shell,
             state.reported_size.0,
             state.reported_size.1,
             state.reported_cell_size.0,
             state.reported_cell_size.1,
-            state.pixel_mouse_available(),
+            pixel_mouse_available,
         );
         if let Some(activation) = pending_activation.as_mut() {
             if let Err(error) = activation.update_resize(resize, endpoints) {

@@ -315,6 +315,16 @@ The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](
 
 Set `tab_bar_position = "bottom"` under `[ui]` to place the desktop tab row below the terminal panes. Prefix, Navigate, Copy, and Resize mode bars temporarily replace the bottom tab row while active. The default is `"top"`.
 
+The desktop tab bar uses a single row by default. Enable wrapped rows in **Settings → tabs**, or configure:
+
+```toml
+[ui]
+tab_bar_wrap = true
+tab_bar_max_rows = 3
+```
+
+`tab_bar_wrap` defaults to `false`. `tab_bar_max_rows` defaults to `3`; `0` is treated as `1`. The maximum limits wrapped rows without reserving unused rows. Settings also lets you increase or decrease the maximum. Switching back to **Single row** retains your maximum for the next time you enable wrapping. These client-local settings apply on config reload without restarting panes.
+
 Configure an ordered tmux-style status area at the right edge of the tab row:
 
 ```toml

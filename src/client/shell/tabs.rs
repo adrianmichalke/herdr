@@ -1,7 +1,7 @@
 use super::*;
 
-const TAB_SCROLL_BUTTON_WIDTH: u16 = 3;
-const MIN_TAB_STRIP_WIDTH: u16 =
+pub(super) const TAB_SCROLL_BUTTON_WIDTH: u16 = 3;
+pub(super) const MIN_TAB_STRIP_WIDTH: u16 =
     MIN_TAB_WIDTH + NEW_TAB_WIDTH + TAB_SCROLL_BUTTON_WIDTH.saturating_mul(2);
 
 pub(crate) fn render_tab_bar(
@@ -11,9 +11,20 @@ pub(crate) fn render_tab_bar(
     config: &ClientShellConfig,
     tab_scroll: &mut usize,
     reveal_focused_tab: &mut bool,
-    tab_drag_insert_index: Option<usize>,
     hits: &mut ShellHitMap,
 ) {
+    if config.tab_bar_wrap {
+        super::wrapped_tabs::render_wrapped_tab_bar(
+            buffer,
+            area,
+            snapshot,
+            config,
+            tab_scroll,
+            reveal_focused_tab,
+            hits,
+        );
+        return;
+    }
     let palette = &config.palette;
     buffer.set_style(area, Style::default().bg(palette.panel_bg));
     let tabs = snapshot
@@ -21,13 +32,7 @@ pub(crate) fn render_tab_bar(
         .iter()
         .filter(|tab| Some(tab.workspace_id.as_str()) == snapshot.focused_workspace_id.as_deref())
         .collect::<Vec<_>>();
-    let desired_widths = tabs
-        .iter()
-        .map(|tab| {
-            let label = tab_label(tab);
-            display_width(&label).saturating_add(4).max(MIN_TAB_WIDTH)
-        })
-        .collect::<Vec<_>>();
+    let desired_widths = tabs.iter().map(|tab| tab_width(tab)).collect::<Vec<_>>();
     let content = tab_bar_content_area(snapshot, area);
     let mouse_chrome = config.mouse_capture;
     let new_tab_width = if mouse_chrome { NEW_TAB_WIDTH } else { 0 };
@@ -208,18 +213,6 @@ pub(crate) fn render_tab_bar(
         );
     }
 
-    if let Some(insert_index) = tab_drag_insert_index {
-        if let Some(indicator_x) = tab_drop_indicator_x(hits, &tabs, insert_index) {
-            put_text(
-                buffer,
-                indicator_x.min(content.right().saturating_sub(1)),
-                area.y,
-                1,
-                "│",
-                Style::default().fg(palette.accent),
-            );
-        }
-    }
     render_tab_bar_status(buffer, area, snapshot, palette);
 }
 
@@ -244,7 +237,7 @@ fn tab_bar_status_area(snapshot: &ClientShellSnapshot, area: Rect) -> Option<Rec
         .then(|| Rect::new(area.right().saturating_sub(width), area.y, width, 1))
 }
 
-fn tab_bar_content_area(snapshot: &ClientShellSnapshot, area: Rect) -> Rect {
+pub(super) fn tab_bar_content_area(snapshot: &ClientShellSnapshot, area: Rect) -> Rect {
     let reserved = tab_bar_status_area(snapshot, area)
         .map(|status| status.width.saturating_add(1))
         .unwrap_or(0);
@@ -254,7 +247,7 @@ fn tab_bar_content_area(snapshot: &ClientShellSnapshot, area: Rect) -> Rect {
     }
 }
 
-fn render_tab_bar_status(
+pub(super) fn render_tab_bar_status(
     buffer: &mut Buffer,
     area: Rect,
     snapshot: &ClientShellSnapshot,
@@ -288,6 +281,54 @@ fn render_tab_bar_status(
         };
         put_text(buffer, x, area.y, width, &segment.text, style);
         x = x.saturating_add(width);
+    }
+}
+
+pub(crate) fn render_tab_drop_indicator(
+    buffer: &mut Buffer,
+    hits: &ShellHitMap,
+    snapshot: &ClientShellSnapshot,
+    insert_index: usize,
+    palette: &Palette,
+) {
+    let tabs = snapshot
+        .tabs
+        .iter()
+        .filter(|tab| Some(tab.workspace_id.as_str()) == snapshot.focused_workspace_id.as_deref())
+        .collect::<Vec<_>>();
+    let point = if hits.tab_body.is_empty() {
+        tab_drop_indicator_x(hits, &tabs, insert_index)
+            .zip(hits.tabs.first().map(|(rect, _)| rect.y))
+    } else {
+        let body = hits.tab_body;
+        let rect_for = |index: usize| {
+            tabs.get(index).and_then(|tab| {
+                hits.tabs
+                    .iter()
+                    .find(|(_, id)| *id == tab.tab_id)
+                    .map(|(rect, _)| *rect)
+            })
+        };
+        rect_for(insert_index)
+            .map(|rect| (rect.x.saturating_sub(1).max(body.x), rect.y))
+            .or_else(|| {
+                insert_index
+                    .checked_sub(1)
+                    .and_then(rect_for)
+                    .map(|rect| (rect.right().min(body.right().saturating_sub(1)), rect.y))
+            })
+            .or_else(|| (insert_index == 0).then_some((body.x, body.y)))
+            .or_else(|| {
+                (insert_index >= tabs.len()).then_some((
+                    body.right().saturating_sub(1),
+                    body.bottom().saturating_sub(1),
+                ))
+            })
+    };
+    if let Some((x, y)) =
+        point.filter(|(x, y)| *x < buffer.area.right() && *y < buffer.area.bottom())
+    {
+        put_text(buffer, x, y, 1, "│", Style::default().fg(palette.accent));
     }
 }
 
@@ -371,7 +412,14 @@ fn max_tab_scroll(widths: &[u16], available: u16) -> usize {
     start
 }
 
-fn tab_label(tab: &ClientShellTab) -> String {
+pub(super) fn tab_width(tab: &ClientShellTab) -> u16 {
+    display_width(&tab.label)
+        .saturating_add(if tab.zoomed { 2 } else { 0 })
+        .saturating_add(4)
+        .max(MIN_TAB_WIDTH)
+}
+
+pub(super) fn tab_label(tab: &ClientShellTab) -> String {
     if tab.zoomed {
         format!("{} Z", tab.label)
     } else {

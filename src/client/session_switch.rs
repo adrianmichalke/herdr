@@ -968,14 +968,15 @@ impl SessionSwitchCoordinator {
                         .is_some()
                 })
             {
-                let shell = context.state.shell.as_ref().expect("session client shell");
+                let pixel_mouse_available = context.state.pixel_mouse_available();
+                let shell = context.state.shell.as_mut().expect("session client shell");
                 let resize = client_shell_resize_message(
                     shell,
                     context.state.reported_size.0,
                     context.state.reported_size.1,
                     context.state.reported_cell_size.0,
                     context.state.reported_cell_size.1,
-                    context.state.pixel_mouse_available(),
+                    pixel_mouse_available,
                 );
                 let activation_serial = *context.next_surface_serial;
                 let activation = endpoint::PendingEndpointActivation::prepare(
