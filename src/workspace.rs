@@ -149,11 +149,14 @@ pub(crate) fn public_tab_id_for_number(workspace_id: &str, tab_number: usize) ->
 }
 
 pub(crate) fn reserve_workspace_ids(workspaces: &[Workspace]) {
-    let Some(next) = workspaces
-        .iter()
-        .filter_map(|workspace| public_workspace_number(&workspace.id))
-        .max()
-        .and_then(|max| u64::try_from(max.checked_add(1)?).ok())
+    for workspace in workspaces {
+        reserve_workspace_id(&workspace.id);
+    }
+}
+
+pub(crate) fn reserve_workspace_id(id: &str) {
+    let Some(next) =
+        public_workspace_number(id).and_then(|number| u64::try_from(number.checked_add(1)?).ok())
     else {
         return;
     };

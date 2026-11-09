@@ -388,6 +388,9 @@ impl ClientShellState {
             );
             return false;
         }
+        if changes_focus {
+            self.note_session_navigation();
+        }
         let Some(snapshot) = self.snapshot.as_deref() else {
             return false;
         };

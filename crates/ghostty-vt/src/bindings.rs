@@ -3213,6 +3213,7 @@ pub const GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_MAX_VALUE: GhosttyTerminalO
 pub type GhosttyTerminalOption = ::std::os::raw::c_int;
 #[doc = " Invalid data type. Never results in any data extraction."]
 pub const GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_INVALID: GhosttyTerminalData = 0;
+pub const GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS_STATE: GhosttyTerminalData = 42;
 #[doc = " Terminal width in cells.\n\n Output type: uint16_t *"]
 pub const GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLS: GhosttyTerminalData = 1;
 #[doc = " Terminal height in cells.\n\n Output type: uint16_t *"]

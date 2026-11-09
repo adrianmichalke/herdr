@@ -298,10 +298,15 @@ impl HeadlessServer {
     /// in the headless server — use this method instead.
     ///
     /// Returns true if the event changed visual state (requiring a re-render).
-    pub(super) fn handle_internal_event_with_forwarding(&mut self, mut ev: AppEvent) -> bool {
+    pub(super) fn handle_internal_event_with_forwarding(&mut self, ev: AppEvent) -> bool {
         if self.host_shutdown_requested() {
             return false;
         }
+        #[cfg(unix)]
+        let Some(ev) = self.defer_workspace_transfer_exit(ev) else {
+            return false;
+        };
+        let mut ev = ev;
         let focus_response = match &mut ev {
             AppEvent::WorktreeAddFinished(result) => result
                 .api_request

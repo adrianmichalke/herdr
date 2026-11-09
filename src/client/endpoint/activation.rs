@@ -226,6 +226,10 @@ impl PendingEndpointActivation {
         self.session_handoff
     }
 
+    pub(crate) fn serial(&self) -> u64 {
+        self.epoch
+    }
+
     pub(crate) fn target_generation(&self) -> u64 {
         self.target.generation
     }

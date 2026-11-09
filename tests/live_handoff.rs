@@ -1033,6 +1033,16 @@ fn live_handoff_preserves_pane_process_io() {
         .as_str()
         .unwrap()
         .to_string();
+    let terminal_ids = [
+        (
+            &pane_id,
+            created["result"]["root_pane"]["terminal_id"].clone(),
+        ),
+        (
+            &second_pane_id,
+            split["result"]["pane"]["terminal_id"].clone(),
+        ),
+    ];
 
     let command = format!(
         "sh -c 'echo READY $$ > {}; trap \"echo HUP >> {}\" HUP; while read line; do echo got:$line; echo got:$line >> {}; done'",
@@ -1110,6 +1120,16 @@ fn live_handoff_preserves_pane_process_io() {
     thread::sleep(Duration::from_millis(300));
     wait_for_api(&api_socket, Duration::from_secs(10));
     wait_for_socket(&client_socket, Duration::from_secs(5));
+    for (public_pane_id, terminal_id) in terminal_ids {
+        assert!(terminal_id.as_str().is_some());
+        let response = request(
+            &api_socket,
+            serde_json::json!({"id":"test:identity", "method":"pane.get", "params":{"pane_id":public_pane_id}}),
+        );
+        assert_ok(response.clone());
+        assert_eq!(response["result"]["pane"]["pane_id"], *public_pane_id);
+        assert_eq!(response["result"]["pane"]["terminal_id"], terminal_id);
+    }
     assert_eq!(unsafe { libc::kill(child_pid as libc::pid_t, 0) }, 0);
     assert_eq!(unsafe { libc::kill(second_child_pid as libc::pid_t, 0) }, 0);
     assert!(
@@ -1471,7 +1491,7 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
     fs::write(
         &fake_pi,
         format!(
-            "#!/bin/sh\nexport HERDR_AGENT=pi\necho started > {}\n/bin/sleep 30\n:\n",
+            "#!/bin/sh\nexport HERDR_AGENT=pi\necho started > {}\nsleep 30\n:\n",
             started_marker.display()
         ),
     )

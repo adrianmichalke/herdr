@@ -1,5 +1,135 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+
+const MAX_TRANSFER_TIME_OFFSET: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
+const MAX_TRANSFER_CLOCK_SAMPLE_INTERVAL: Duration = Duration::from_millis(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TransferTimestamp {
+    seconds: u64,
+    nanoseconds: u32,
+}
+
+impl TransferTimestamp {
+    fn from_wall(wall: SystemTime) -> Result<Self, String> {
+        let elapsed = wall
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| "transfer timestamp precedes Unix epoch".to_string())?;
+        Ok(Self {
+            seconds: elapsed.as_secs(),
+            nanoseconds: elapsed.subsec_nanos(),
+        })
+    }
+
+    fn to_wall(self) -> Result<SystemTime, String> {
+        if self.nanoseconds >= 1_000_000_000 {
+            return Err("invalid transfer timestamp nanoseconds".into());
+        }
+        UNIX_EPOCH
+            .checked_add(Duration::new(self.seconds, self.nanoseconds))
+            .ok_or_else(|| "transfer timestamp is out of range".into())
+    }
+}
+
+pub(crate) struct TransferClock {
+    instant: Instant,
+    wall: SystemTime,
+}
+
+impl TransferClock {
+    pub(crate) fn now() -> Result<Self, String> {
+        for _ in 0..3 {
+            let before = Instant::now();
+            let wall = SystemTime::now();
+            let after = Instant::now();
+            if let Ok(clock) = Self::from_sample(before, wall, after) {
+                return Ok(clock);
+            }
+        }
+        Err("unable to sample transfer wall clock within 1 millisecond".into())
+    }
+
+    fn from_sample(before: Instant, wall: SystemTime, after: Instant) -> Result<Self, String> {
+        let interval = after
+            .checked_duration_since(before)
+            .filter(|interval| *interval <= MAX_TRANSFER_CLOCK_SAMPLE_INTERVAL)
+            .ok_or_else(|| "transfer wall clock sampling interval is out of range".to_string())?;
+        let instant = before
+            .checked_add(interval / 2)
+            .ok_or_else(|| "transfer clock sampling exceeds monotonic clock range".to_string())?;
+        Ok(Self { instant, wall })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn at(instant: Instant, wall: SystemTime) -> Self {
+        Self { instant, wall }
+    }
+
+    pub(crate) fn captured_at(&self) -> Result<TransferTimestamp, String> {
+        TransferTimestamp::from_wall(self.wall)
+    }
+
+    pub(crate) fn validate_capture(&self, captured_at: TransferTimestamp) -> Result<(), String> {
+        let elapsed = self
+            .wall
+            .duration_since(captured_at.to_wall()?)
+            .map_err(|_| "wall clock moved backwards since transfer capture".to_string())?;
+        if elapsed > MAX_TRANSFER_TIME_OFFSET {
+            return Err("transfer capture time is out of range".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn encode(&self, instant: Instant) -> Result<TransferTimestamp, String> {
+        let wall = if let Some(offset) = instant.checked_duration_since(self.instant) {
+            Self::validate_offset(offset)?;
+            self.wall.checked_add(offset)
+        } else {
+            let offset = self.instant.duration_since(instant);
+            Self::validate_offset(offset)?;
+            self.wall.checked_sub(offset)
+        }
+        .ok_or_else(|| "transfer timestamp is out of range".to_string())?;
+        TransferTimestamp::from_wall(wall)
+    }
+
+    pub(crate) fn decode(&self, timestamp: TransferTimestamp) -> Result<Instant, String> {
+        let wall = timestamp.to_wall()?;
+        let instant = if let Ok(offset) = wall.duration_since(self.wall) {
+            Self::validate_offset(offset)?;
+            self.instant.checked_add(offset)
+        } else {
+            let offset = self
+                .wall
+                .duration_since(wall)
+                .map_err(|_| "transfer timestamp is out of range".to_string())?;
+            Self::validate_offset(offset)?;
+            self.instant.checked_sub(offset)
+        };
+        instant.ok_or_else(|| "transfer timestamp exceeds monotonic clock range".into())
+    }
+
+    fn validate_offset(offset: Duration) -> Result<(), String> {
+        if offset > MAX_TRANSFER_TIME_OFFSET {
+            return Err("transfer timestamp exceeds supported 100-year clock range".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MetadataTokenTransferState {
+    value: String,
+    expires_at: Option<TransferTimestamp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MetadataTokensTransferState {
+    captured_at: TransferTimestamp,
+    entries: HashMap<String, MetadataTokenTransferState>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MetadataToken {
@@ -40,7 +170,68 @@ pub(crate) fn accept_sequence(
     Ok(true)
 }
 
+impl Serialize for MetadataTokens {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let clock = TransferClock::now().map_err(serde::ser::Error::custom)?;
+        self.transfer_state(&clock)
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MetadataTokens {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let snapshot = MetadataTokensTransferState::deserialize(deserializer)?;
+        let clock = TransferClock::now().map_err(serde::de::Error::custom)?;
+        Self::from_transfer_state(snapshot, &clock).map_err(serde::de::Error::custom)
+    }
+}
+
 impl MetadataTokens {
+    pub(crate) fn transfer_state(
+        &self,
+        clock: &TransferClock,
+    ) -> Result<MetadataTokensTransferState, String> {
+        Ok(MetadataTokensTransferState {
+            captured_at: clock.captured_at()?,
+            entries: self
+                .entries
+                .iter()
+                .map(|(key, token)| {
+                    Ok((
+                        key.clone(),
+                        MetadataTokenTransferState {
+                            value: token.value.clone(),
+                            expires_at: token.expires_at.map(|at| clock.encode(at)).transpose()?,
+                        },
+                    ))
+                })
+                .collect::<Result<_, String>>()?,
+        })
+    }
+
+    pub(crate) fn from_transfer_state(
+        snapshot: MetadataTokensTransferState,
+        clock: &TransferClock,
+    ) -> Result<Self, String> {
+        clock.validate_capture(snapshot.captured_at)?;
+        Ok(Self {
+            entries: snapshot
+                .entries
+                .into_iter()
+                .map(|(key, token)| {
+                    Ok((
+                        key,
+                        MetadataToken {
+                            value: token.value,
+                            expires_at: token.expires_at.map(|at| clock.decode(at)).transpose()?,
+                        },
+                    ))
+                })
+                .collect::<Result<_, String>>()?,
+        })
+    }
+
     pub(crate) fn patch(
         &mut self,
         patch: HashMap<String, Option<String>>,
@@ -112,6 +303,136 @@ mod tests {
             .iter()
             .map(|(key, value)| ((*key).into(), value.map(str::to_string)))
             .collect()
+    }
+
+    #[test]
+    fn workspace_transfer_clock_sampling_rejects_excessive_skew() {
+        let before = Instant::now();
+        let wall = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let after = before + MAX_TRANSFER_CLOCK_SAMPLE_INTERVAL;
+        let clock = TransferClock::from_sample(before, wall, after).unwrap();
+        assert_eq!(
+            clock.instant,
+            before + MAX_TRANSFER_CLOCK_SAMPLE_INTERVAL / 2
+        );
+        assert!(TransferClock::from_sample(before, wall, after + Duration::from_nanos(1)).is_err());
+        assert!(TransferClock::from_sample(after, wall, before).is_err());
+        let boundary = TransferTimestamp {
+            seconds: 1_800_000_000 + MAX_TRANSFER_TIME_OFFSET.as_secs(),
+            nanoseconds: 0,
+        };
+        let instant = clock.decode(boundary).unwrap();
+        assert_eq!(
+            instant.duration_since(clock.instant),
+            MAX_TRANSFER_TIME_OFFSET
+        );
+        assert_eq!(clock.encode(instant).unwrap(), boundary);
+        assert!(clock
+            .decode(TransferTimestamp {
+                seconds: 1_800_000_000 + MAX_TRANSFER_TIME_OFFSET.as_secs(),
+                nanoseconds: 1,
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn workspace_transfer_tokens_roundtrip_absolute_deadlines_without_refresh() {
+        let now = Instant::now();
+        let wall = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let source_clock = TransferClock::at(now, wall);
+        let mut tokens = MetadataTokens::default();
+        tokens.patch(
+            patch(&[("short", Some("temporary"))]),
+            Some(Duration::from_secs(10)),
+            now - Duration::from_secs(7),
+        );
+        tokens.patch(
+            patch(&[("expired", Some("pending sweep"))]),
+            Some(Duration::ZERO),
+            now - Duration::from_secs(2),
+        );
+        tokens.patch(patch(&[("permanent", Some("keep"))]), None, now);
+        let snapshot = tokens.transfer_state(&source_clock).unwrap();
+        let json = serde_json::to_vec(&snapshot).unwrap();
+        let decoded = serde_json::from_slice(&json).unwrap();
+        let arrival = now + Duration::from_secs(700);
+        let destination_clock = TransferClock::at(arrival, wall + Duration::from_secs(2));
+        let mut restored =
+            MetadataTokens::from_transfer_state(decoded, &destination_clock).unwrap();
+
+        assert_eq!(restored.values(), tokens.values());
+        assert_eq!(
+            restored.next_expiry(),
+            Some(arrival - Duration::from_secs(4))
+        );
+        assert!(restored.expire_at(arrival));
+        assert_eq!(
+            restored.next_expiry(),
+            Some(arrival + Duration::from_secs(1))
+        );
+        assert!(!restored.expire_at(arrival + Duration::from_secs(1) - Duration::from_nanos(1)));
+        assert!(restored.expire_at(arrival + Duration::from_secs(1)));
+        assert_eq!(
+            restored.values(),
+            HashMap::from([("permanent".into(), "keep".into())])
+        );
+    }
+
+    #[test]
+    fn workspace_transfer_tokens_support_direct_serde_with_deadlines() {
+        let now = Instant::now();
+        let mut tokens = MetadataTokens::default();
+        tokens.patch(
+            patch(&[("short", Some("temporary"))]),
+            Some(Duration::from_secs(30)),
+            now - Duration::from_secs(10),
+        );
+        tokens.patch(patch(&[("permanent", Some("keep"))]), None, now);
+        let json = serde_json::to_vec(&tokens).unwrap();
+        let restored: MetadataTokens = serde_json::from_slice(&json).unwrap();
+        assert_eq!(restored.values(), tokens.values());
+        assert!(restored.next_expiry().unwrap() < now + Duration::from_secs(21));
+        assert!(restored.next_expiry().unwrap() > now + Duration::from_secs(19));
+        let encoded = bincode::serde::encode_to_vec(&tokens, bincode::config::standard()).unwrap();
+        let (restored, consumed): (MetadataTokens, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(restored.values(), tokens.values());
+        assert!(restored.next_expiry().unwrap() < now + Duration::from_secs(21));
+    }
+
+    #[test]
+    fn workspace_transfer_tokens_reject_invalid_deadlines_and_clock_rollback() {
+        let now = Instant::now();
+        let wall = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let clock = TransferClock::at(now, wall);
+        let mut tokens = MetadataTokens::default();
+        tokens.patch(
+            patch(&[("short", Some("temporary"))]),
+            Some(Duration::from_secs(1)),
+            now,
+        );
+        let snapshot = tokens.transfer_state(&clock).unwrap();
+        let backwards = TransferClock::at(now, wall - Duration::from_nanos(1));
+        assert!(
+            MetadataTokens::from_transfer_state(snapshot.clone(), &backwards)
+                .unwrap_err()
+                .contains("backwards")
+        );
+        let mut invalid = snapshot;
+        invalid.entries.get_mut("short").unwrap().expires_at = Some(TransferTimestamp {
+            seconds: u64::MAX,
+            nanoseconds: 0,
+        });
+        assert!(MetadataTokens::from_transfer_state(invalid, &clock).is_err());
+        let before_epoch = TransferClock::at(now, UNIX_EPOCH);
+        assert!(before_epoch.encode(now - Duration::from_secs(1)).is_err());
+        assert!(clock
+            .decode(TransferTimestamp {
+                seconds: 1_800_000_000,
+                nanoseconds: 1_000_000_000
+            })
+            .is_err());
     }
 
     #[test]

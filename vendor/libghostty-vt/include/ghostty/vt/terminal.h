@@ -1600,6 +1600,7 @@ typedef enum GHOSTTY_ENUM_TYPED {
 typedef enum GHOSTTY_ENUM_TYPED {
   /** Invalid data type. Never results in any data extraction. */
   GHOSTTY_TERMINAL_DATA_INVALID = 0,
+  GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS_STATE = 42,
 
   /**
    * Terminal width in cells.

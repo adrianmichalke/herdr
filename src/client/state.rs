@@ -77,7 +77,8 @@ pub(super) struct ClientState {
     pub(super) presentation_frozen: bool,
     /// Latest explicit Local selection awaiting this client's replacement Local connection.
     pub(super) deferred_local_activation: Option<endpoint::EndpointActivationIntent>,
-    pub(super) activation_completion: Option<(endpoint::ClientEndpointId, u64, Result<(), String>)>,
+    pub(super) activation_completion:
+        Option<(endpoint::ClientEndpointId, u64, u64, Result<(), String>)>,
     pub(super) draw_host_cursor: bool,
     pub(super) detached_process_children: Vec<std::process::Child>,
     pub(super) shell: Option<shell::ClientShellState>,

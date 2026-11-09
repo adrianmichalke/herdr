@@ -458,7 +458,8 @@ impl HeadlessServer {
         if render_targets.is_empty() {
             let (cols, rows) = self.effective_size;
             let area = Rect::new(0, 0, cols, rows);
-            let resize_panes = self.app.state.view.pane_infos.is_empty();
+            let resize_panes = self.app.state.view.pane_infos.is_empty()
+                && self.app.state.workspace_transfer_fences.is_empty();
             if resize_panes {
                 crate::ui::compute_view_with_runtime_registry(
                     &mut self.app.state,
@@ -520,6 +521,13 @@ impl HeadlessServer {
                 });
             if changed {
                 if let Some(target) = self.shell_target_for_client(*client_id) {
+                    if self
+                        .app
+                        .state
+                        .workspace_transfer_fenced(target.workspace_index)
+                    {
+                        continue;
+                    }
                     let area = Rect::new(0, 0, *cols, *rows);
                     let layout = crate::ui::compute_tab_surface_for(
                         &self.app.state,

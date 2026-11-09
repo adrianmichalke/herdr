@@ -23,6 +23,10 @@ impl PaneId {
         self.0
     }
 
+    pub(crate) fn reserve(raw: u32) {
+        NEXT_PANE_ID.fetch_max(raw.saturating_add(1), std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Reconstruct from a saved u32 (persistence only).
     pub fn from_raw(id: u32) -> Self {
         Self(id)
@@ -116,6 +120,14 @@ impl TileLayout {
 
     pub fn focused(&self) -> PaneId {
         self.focus
+    }
+
+    pub(crate) fn previous_focus(&self) -> Option<PaneId> {
+        self.prev_focus
+    }
+
+    pub(crate) fn restore_previous_focus(&mut self, focus: Option<PaneId>) {
+        self.prev_focus = focus;
     }
 
     pub fn pane_count(&self) -> usize {

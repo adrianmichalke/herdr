@@ -21,6 +21,154 @@ pub struct AgentMetadata {
     expiry_event_pending: bool,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct AgentMetadataTransferState {
+    source: String,
+    agent_label: Option<String>,
+    applies_to_source: Option<String>,
+    title: Option<String>,
+    display_agent: Option<String>,
+    state_labels: HashMap<String, String>,
+    reported_at: crate::metadata_tokens::TransferTimestamp,
+    title_reported_at: Option<crate::metadata_tokens::TransferTimestamp>,
+    display_agent_reported_at: Option<crate::metadata_tokens::TransferTimestamp>,
+    state_label_reported_at: HashMap<String, crate::metadata_tokens::TransferTimestamp>,
+    ttl: Option<Duration>,
+    expiry_event_pending: bool,
+}
+
+impl AgentMetadata {
+    pub(super) fn transfer_state(
+        &self,
+        clock: &crate::metadata_tokens::TransferClock,
+    ) -> Result<AgentMetadataTransferState, String> {
+        let Self {
+            source,
+            agent_label,
+            applies_to_source,
+            title,
+            display_agent,
+            state_labels,
+            reported_at,
+            title_reported_at,
+            display_agent_reported_at,
+            state_label_reported_at,
+            ttl,
+            expiry_event_pending,
+        } = self;
+        self.validate_transfer_deadline(clock)?;
+        Ok(AgentMetadataTransferState {
+            source: source.clone(),
+            agent_label: agent_label.clone(),
+            applies_to_source: applies_to_source.clone(),
+            title: title.clone(),
+            display_agent: display_agent.clone(),
+            state_labels: state_labels.clone(),
+            reported_at: clock.encode(*reported_at)?,
+            title_reported_at: title_reported_at.map(|at| clock.encode(at)).transpose()?,
+            display_agent_reported_at: display_agent_reported_at
+                .map(|at| clock.encode(at))
+                .transpose()?,
+            state_label_reported_at: state_label_reported_at
+                .iter()
+                .map(|(state, at)| Ok((state.clone(), clock.encode(*at)?)))
+                .collect::<Result<_, String>>()?,
+            ttl: *ttl,
+            expiry_event_pending: *expiry_event_pending,
+        })
+    }
+
+    fn validate_transfer_deadline(
+        &self,
+        clock: &crate::metadata_tokens::TransferClock,
+    ) -> Result<(), String> {
+        if let Some(ttl) = self.ttl {
+            let deadline = self
+                .reported_at
+                .checked_add(ttl)
+                .ok_or_else(|| "agent metadata TTL exceeds monotonic clock range".to_string())?;
+            clock.encode(deadline)?;
+        }
+        Ok(())
+    }
+
+    fn transfer_precedence_conflicts(&self, other: &Self) -> bool {
+        if self
+            .agent_label
+            .as_ref()
+            .zip(other.agent_label.as_ref())
+            .is_some_and(|(left, right)| left != right)
+            || self
+                .applies_to_source
+                .as_ref()
+                .zip(other.applies_to_source.as_ref())
+                .is_some_and(|(left, right)| left != right)
+        {
+            return false;
+        }
+        (self.title.is_some()
+            && other.title.is_some()
+            && self.title_reported_at == other.title_reported_at
+            && self.title != other.title)
+            || (self.display_agent.is_some()
+                && other.display_agent.is_some()
+                && self.display_agent_reported_at == other.display_agent_reported_at
+                && self.display_agent != other.display_agent)
+            || self.state_labels.iter().any(|(state, label)| {
+                other.state_labels.get(state).is_some_and(|other_label| {
+                    label != other_label
+                        && self
+                            .state_label_reported_at
+                            .get(state)
+                            .is_some_and(|at| other.state_label_reported_at.get(state) == Some(at))
+                })
+            })
+    }
+}
+
+impl AgentMetadataTransferState {
+    pub(super) fn restore(
+        self,
+        clock: &crate::metadata_tokens::TransferClock,
+    ) -> Result<AgentMetadata, String> {
+        let Self {
+            source,
+            agent_label,
+            applies_to_source,
+            title,
+            display_agent,
+            state_labels,
+            reported_at,
+            title_reported_at,
+            display_agent_reported_at,
+            state_label_reported_at,
+            ttl,
+            expiry_event_pending,
+        } = self;
+        let metadata = AgentMetadata {
+            source,
+            agent_label,
+            applies_to_source,
+            title,
+            display_agent,
+            state_labels,
+            reported_at: clock.decode(reported_at)?,
+            title_reported_at: title_reported_at.map(|at| clock.decode(at)).transpose()?,
+            display_agent_reported_at: display_agent_reported_at
+                .map(|at| clock.decode(at))
+                .transpose()?,
+            state_label_reported_at: state_label_reported_at
+                .into_iter()
+                .map(|(state, at)| Ok((state, clock.decode(at)?)))
+                .collect::<Result<_, String>>()?,
+            ttl,
+            expiry_event_pending,
+        };
+        metadata.validate_transfer_deadline(clock)?;
+        Ok(metadata)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentMetadataReport {
     pub source: String,
@@ -54,6 +202,18 @@ impl EffectivePresentation {
 }
 
 impl TerminalState {
+    pub(super) fn validate_workspace_transfer_metadata(&self) -> Result<(), String> {
+        let metadata: Vec<_> = self.agent_metadata.values().collect();
+        for (index, left) in metadata.iter().enumerate() {
+            for right in &metadata[index + 1..] {
+                if left.transfer_precedence_conflicts(right) {
+                    return Err("agent metadata has ambiguous equal-timestamp precedence".into());
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn metadata_report_sequence_is_fresh(&self, source: &str, seq: Option<u64>) -> bool {
         crate::metadata_tokens::sequence_is_fresh(&self.metadata_report_sequences, source, seq)
     }
@@ -527,6 +687,60 @@ mod tests {
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
+    }
+
+    #[test]
+    fn workspace_transfer_keeps_per_field_nanosecond_precedence() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        for source in ["user:first", "user:second"] {
+            terminal.set_agent_metadata(AgentMetadataReport {
+                source: source.into(),
+                agent_label: None,
+                applies_to_source: None,
+                title: Some(source.into()),
+                display_agent: Some(source.into()),
+                state_labels: HashMap::from([("working".into(), source.into())]),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_state_labels: false,
+                ttl: Some(Duration::from_secs(60)),
+                seq: Some(1),
+            });
+        }
+        let first = terminal.agent_metadata.get_mut("user:first").unwrap();
+        first.title_reported_at = Some(now - Duration::from_secs(5));
+        first.display_agent_reported_at = Some(now - Duration::from_secs(2));
+        first
+            .state_label_reported_at
+            .insert("working".into(), now - Duration::from_secs(3));
+        let second = terminal.agent_metadata.get_mut("user:second").unwrap();
+        second.title_reported_at = Some(now - Duration::from_secs(5) + Duration::from_nanos(1));
+        second.display_agent_reported_at = Some(now - Duration::from_secs(4));
+        second.state_label_reported_at.insert(
+            "working".into(),
+            now - Duration::from_secs(3) + Duration::from_nanos(1),
+        );
+        let snapshot = terminal.workspace_transfer_state().unwrap();
+        let snapshot = serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        let restored = TerminalState::from_workspace_transfer_state(snapshot).unwrap();
+        let presentation = restored.effective_presentation();
+
+        assert_eq!(presentation.title.as_deref(), Some("user:second"));
+        assert_eq!(presentation.display_agent.as_deref(), Some("user:first"));
+        assert_eq!(presentation.state_labels["working"], "user:second");
+        assert_eq!(
+            restored.agent_metadata["user:second"]
+                .title_reported_at
+                .unwrap()
+                .duration_since(
+                    restored.agent_metadata["user:first"]
+                        .title_reported_at
+                        .unwrap()
+                ),
+            Duration::from_nanos(1)
+        );
+        assert_eq!(presentation, terminal.effective_presentation());
     }
 
     #[test]

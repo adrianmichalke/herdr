@@ -115,6 +115,8 @@ fn stage(
         cancelled: Arc::new(AtomicBool::new(false)),
         phase: PreparationPhase::Preparing,
         deadline: Instant::now() + PREPARATION_TIMEOUT,
+        follow: None,
+        activation_serial: None,
     });
     coordinator.latest_serial = request_id;
     key
@@ -218,6 +220,7 @@ fn current_live_session_is_a_noop_and_inactive_current_binding_reuses_its_transp
             },
             session: fingerprint.configured_session,
             create: false,
+            follow: None,
         },
         &mut harness.context(),
     );
@@ -254,6 +257,7 @@ fn current_live_session_is_a_noop_and_inactive_current_binding_reuses_its_transp
             },
             session: "initial".into(),
             create: false,
+            follow: None,
         },
         &mut harness.context(),
     );
@@ -296,6 +300,7 @@ fn invalid_session_preflight_does_not_stage_a_candidate_or_touch_the_source() {
             },
             session: "../invalid".into(),
             create: true,
+            follow: None,
         },
         &mut harness.context(),
     );

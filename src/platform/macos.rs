@@ -9,6 +9,10 @@ use std::sync::OnceLock;
 
 pub(super) const REMOTE_BRIDGE_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
 
+pub(crate) fn workspace_transfer_domain() -> std::io::Result<String> {
+    Ok(format!("macos:{}", unsafe { libc::geteuid() }))
+}
+
 use super::{
     read_limited_reader, ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess,
     LimitedRead, Signal,

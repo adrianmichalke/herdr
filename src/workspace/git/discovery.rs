@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 const MAX_GIT_REF_FILE_BYTES: usize = 64 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitSpaceMetadata {
     pub key: String,
     pub checkout_key: String,

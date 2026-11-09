@@ -22,7 +22,13 @@ Choose a running session to attach to it, or a stopped session to start it using
 
 Switching changes only this UI client's attachment. It does not stop the previous session or its panes and agents. The source remains usable while the destination is prepared; cancellation or a failed connection leaves the source attached and shows an error. Escape leaves the name form first, then closes the picker. Selected-session overrides stay in the client and do not rewrite the saved machine's configured session.
 
-SSH session discovery and startup use existing noninteractive connection rules. The picker does not install or update Herdr, prompt for credentials, rename/delete sessions, or move spaces between sessions. Resolve any SSH authentication or installation problem through the existing machine setup workflow first.
+SSH session discovery and startup use existing noninteractive connection rules. The picker does not install or update Herdr, prompt for credentials, or rename/delete sessions. Resolve any SSH authentication or installation problem through the existing machine setup workflow first.
+
+To move existing work, right-click a space and choose **Move to session...**. This reuses the picker, excludes the source session, and includes **New session**. The destination is on the same selected machine; stopped destinations start with their normal restore settings. All tabs and panes move together without restarting their processes. Layout, order, names, working directories, agent metadata, retained terminal state/history, and focused tab/pane are preserved. Moving the active space follows it in the initiating client only; moving a background space leaves that client's current view unchanged.
+
+Live moves require compatible transfer support on both Unix servers. Unsupported terminal states, including retained Kitty graphics that cannot be represented losslessly, are rejected rather than truncated or restarted. Cancelling the picker before confirmation changes nothing. After confirmation the move resolves ownership before reporting completion; it cannot be cancelled as if no transfer had occurred. Precommit failure resumes the original space, and an uncertain ownership outcome stays pending rather than risking duplicate readers. Other spaces and destination work remain running.
+
+Moved processes retain their original socket and pane environment. The source session forwards those inherited targets using reserved identity mappings, including after a source-server restart. Keep the source available while these processes use inherited hooks or CLI commands; do not delete and recreate that session while those inherited addresses are in use. After settlement the destination's saved space and history no longer depend on the source journal. There is no close-and-recreate fallback or cross-machine migration.
 
 ## Live persistence
 

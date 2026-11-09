@@ -58,6 +58,8 @@ operations::define_operations! {
     ClientWindowTitleClear(EmptyParams) => "client.window_title.clear", false, false;
     ClientShellSurfaceSet(ClientShellSurfaceSetParams) => "client_shell.surface.set", false, true;
     SessionSnapshot(EmptyParams) => "session.snapshot", false, false;
+    WorkspaceTransfer(WorkspaceTransferParams) => "workspace.transfer", false, cfg!(unix);
+    WorkspaceTransferStatus(WorkspaceTransferStatusParams) => "workspace.transfer.status", false, cfg!(unix);
     WorkspaceCreate(WorkspaceCreateParams) => "workspace.create", true, true;
     WorkspaceList(EmptyParams) => "workspace.list", false, false;
     WorkspaceGet(WorkspaceTarget) => "workspace.get", false, false;

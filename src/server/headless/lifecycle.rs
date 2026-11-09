@@ -26,6 +26,12 @@ impl HeadlessServer {
         &mut self,
         params: crate::api::schema::ServerLiveHandoffParams,
     ) -> io::Result<()> {
+        if self.workspace_transfers_preclude_handoff() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "workspace transfer must finish before server handoff",
+            ));
+        }
         info!("starting live handoff");
         let import_exe = params.import_exe.as_deref().map(std::path::PathBuf::from);
         let socket_path = crate::server::handoff::handoff_socket_path();
@@ -84,6 +90,7 @@ impl HeadlessServer {
                 continue;
             };
             let mut handoff_runtime = runtime.handoff_runtime_state(pane_id);
+            handoff_runtime.terminal_id = Some(terminal_id.clone());
             handoff_runtime.agent_state = self
                 .app
                 .state
@@ -114,6 +121,10 @@ impl HeadlessServer {
             self.api_window_title.clone(),
             self.host_shutdown_intent.get(),
         );
+        if let Err(error) = self.suspend_workspace_transfer_listener() {
+            self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
+            return Err(error);
+        }
         let mut import_child = match crate::server::handoff::spawn_handoff_import(
             import_exe.as_deref(),
             &socket_path,
@@ -246,10 +257,11 @@ impl HeadlessServer {
             .api_tx
             .clone()
             .ok_or_else(|| io::Error::other("cannot restore api socket without api sender"))?;
-        let api_server = api::start_server_with_stop_control(
+        let api_server = api::start_server_with_transfer_registry(
             api_tx,
             self.app.event_hub.clone(),
             self.server_stop.clone(),
+            self.transfer_registry.clone(),
         )?;
 
         let client_path = client_socket_path();
@@ -286,6 +298,9 @@ impl HeadlessServer {
         }
         self.handoff_in_progress = false;
         let _ = std::fs::remove_file(socket_path);
+        if let Err(error) = self.restore_workspace_transfer_listener() {
+            warn!(%error, "could not restore workspace transfer listener after server handoff rollback");
+        }
     }
 
     #[cfg(unix)]

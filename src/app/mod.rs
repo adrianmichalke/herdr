@@ -28,6 +28,7 @@ mod terminal_targets;
 mod terminal_titles;
 mod theme_sync;
 mod window_title;
+mod workspace_transfer;
 mod worktrees;
 
 use std::collections::HashMap;
@@ -145,6 +146,7 @@ pub struct App {
     startup_per_agent_delay: Duration,
     next_agent_resume_at: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
+    pub(crate) workspace_transfer_checkpoint_pending: bool,
     pub(crate) session_save_thread: Option<std::thread::JoinHandle<()>>,
     session_writer: Arc<std::sync::Mutex<crate::persist::SessionWriter>>,
     pane_exit_checkpoint_pending: bool,
@@ -405,7 +407,15 @@ impl App {
         let mut restored_terminals = std::collections::HashMap::new();
         let mut restored_activity_sequence = 0;
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        let snapshot = policy.restore_session.then(crate::persist::load).flatten();
+        let mut snapshot = policy.restore_session.then(crate::persist::load).flatten();
+        if policy.restore_session {
+            let transfers = crate::server::workspace_transfer::journal::TransferRegistry::open(
+                crate::server::workspace_transfer::journal::path(),
+            )?;
+            if let Some(snapshot) = snapshot.as_mut() {
+                transfers.suppress_exported_workspaces(snapshot)?;
+            }
+        }
         let mut plugin_installation_leases = crate::plugin_installations::Leases::new();
         let mut plugin_installation_cleanup_allowed = true;
         if policy.persist_plugin_registry {
@@ -502,6 +512,7 @@ impl App {
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces,
+            workspace_transfer_fences: std::collections::HashSet::new(),
             active,
             previous_pane_focus: None,
             selected,
@@ -664,6 +675,7 @@ impl App {
             ),
             next_agent_resume_at: None,
             session_save_deadline: None,
+            workspace_transfer_checkpoint_pending: false,
             session_save_thread: None,
             session_writer,
             pane_exit_checkpoint_pending: false,

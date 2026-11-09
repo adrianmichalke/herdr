@@ -14,6 +14,10 @@ use crate::terminal::TerminalId;
 mod metadata;
 pub use metadata::{AgentMetadata, AgentMetadataReport, EffectivePresentation};
 
+#[path = "transfer.rs"]
+mod transfer;
+pub(crate) use transfer::TerminalTransferState;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HookAuthority {
     pub source: String,
@@ -49,7 +53,7 @@ struct PendingFullLifecycleHookReport {
     seq: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum FullLifecycleHookSuppressionReason {
     HookClear,
     ProcessExit,
@@ -61,7 +65,7 @@ enum FullLifecycleHookReportRoute {
     Ignore,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct StaleFullLifecycleHookSession {
     agent_label: String,
     session_ref: crate::agent_resume::AgentSessionRef,
@@ -109,7 +113,7 @@ pub struct TerminalStateMutation {
     pub agent_released: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct AgentNameOwner {
     agent_label: String,
     session_ref: Option<crate::agent_resume::AgentSessionRef>,

@@ -65,12 +65,27 @@ impl HeadlessServer {
             self.send_to_client(client_id, message);
             return false;
         }
-        if !surface_active {
+        let transfer_status = matches!(
+            request.method,
+            api::schema::Method::WorkspaceTransferStatus(_)
+        );
+        if !surface_active && !transfer_status {
             let message = crate::server::client_commands::error_message(
                 boot_id,
                 request_id,
                 "surface_inactive",
                 "this method requires an active client shell surface",
+            );
+            self.send_to_client(client_id, message);
+            return false;
+        }
+
+        if self.client_request_is_transfer_fenced(client_id, &request) {
+            let message = crate::server::client_commands::error_message(
+                boot_id,
+                request_id,
+                "workspace_busy",
+                "workspace is being transferred; retry after the move completes",
             );
             self.send_to_client(client_id, message);
             return false;
@@ -119,7 +134,7 @@ impl HeadlessServer {
                 deferred_worktree.then(|| api_request_id.clone());
             client.shell_deferred_navigation_response = deferred_navigation.then(Vec::new);
         }
-        let foreground_changed = self.promote_client_to_foreground(client_id);
+        let foreground_changed = !transfer_status && self.promote_client_to_foreground(client_id);
         foreground_changed
             | self.handle_client_shell_api_request(
                 client_id,

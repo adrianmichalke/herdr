@@ -33,6 +33,8 @@ mod osc;
 mod state;
 mod terminal;
 mod xtgettcap;
+#[cfg(unix)]
+pub(crate) use xtgettcap::C1XtgettcapTransferState;
 
 use self::agent_detection::{
     codex_prompt_ready, decide_detection_screen_read, decide_screen_detection_publish,
@@ -1521,6 +1523,64 @@ pub struct PaneRuntime {
     detect_handle: Option<tokio::task::AbortHandle>,
 }
 
+#[cfg(unix)]
+#[derive(Clone)]
+pub struct WorkspaceTransferHandle {
+    pane_id: u32,
+    child_pid: Arc<AtomicU32>,
+    terminal: Arc<PaneTerminal>,
+    control: PtyIoActorHandle,
+    quiesced: Arc<Mutex<bool>>,
+}
+
+#[cfg(unix)]
+impl WorkspaceTransferHandle {
+    pub fn capture(
+        &self,
+    ) -> std::io::Result<(
+        crate::handoff_runtime::HandoffRuntimeState,
+        std::os::fd::OwnedFd,
+    )> {
+        let mut quiesced = self
+            .quiesced
+            .lock()
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        if *quiesced {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "workspace transfer capture is already quiesced",
+            ));
+        }
+        if let Err(err) = self
+            .control
+            .begin_handoff(std::time::Duration::from_secs(3))
+        {
+            if err.kind() != std::io::ErrorKind::WouldBlock {
+                *quiesced = true;
+            }
+            return Err(err);
+        }
+        *quiesced = true;
+        let state = self
+            .terminal
+            .workspace_transfer_snapshot(self.pane_id, self.child_pid.load(Ordering::Acquire))?;
+        let fd = self.control.duplicate_owned_for_handoff()?;
+        Ok((state, fd))
+    }
+
+    pub fn rollback(&self) -> std::io::Result<()> {
+        let mut quiesced = self
+            .quiesced
+            .lock()
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        if *quiesced {
+            self.control.rollback_handoff()?;
+            *quiesced = false;
+        }
+        Ok(())
+    }
+}
+
 enum PaneRuntimeIo {
     Actor(PtyIoActorHandle),
     #[cfg(test)]
@@ -2237,12 +2297,40 @@ impl PaneRuntime {
         }
         self.compression.abort();
         self.io.shutdown();
-        shutdown_pane_processes(
-            self.pane_id,
-            self.child_pid.load(Ordering::Acquire),
-            self.child_wait_completed.as_deref(),
-        );
+        if !self.preserve_processes_on_drop {
+            shutdown_pane_processes(
+                self.pane_id,
+                self.child_pid.load(Ordering::Acquire),
+                self.child_wait_completed.as_deref(),
+            );
+        }
         self.preserve_processes_on_drop = true;
+    }
+
+    #[cfg(unix)]
+    pub fn workspace_transfer_handle(
+        &self,
+        pane_id: u32,
+    ) -> std::io::Result<WorkspaceTransferHandle> {
+        let control = match &self.io {
+            PaneRuntimeIo::Actor(actor) => actor.clone(),
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { .. } => {
+                return Err(std::io::Error::other("test runtime has no PTY actor"));
+            }
+        };
+        Ok(WorkspaceTransferHandle {
+            pane_id,
+            child_pid: self.child_pid.clone(),
+            terminal: self.terminal.clone(),
+            control,
+            quiesced: Arc::new(Mutex::new(false)),
+        })
+    }
+
+    #[cfg(unix)]
+    pub fn set_transfer_drop_protection(&mut self, protected: bool) {
+        self.preserve_processes_on_drop = protected;
     }
 
     #[cfg(unix)]
@@ -2297,6 +2385,7 @@ impl PaneRuntime {
         let (rows, cols, cell_width_px, cell_height_px) = self.current_size.get();
         crate::handoff_runtime::HandoffRuntimeState {
             pane_id,
+            terminal_id: None,
             child_pid,
             rows,
             cols,
@@ -2310,6 +2399,8 @@ impl PaneRuntime {
             input_state: self.input_state(),
             terminal_title: self.terminal_title(),
             initial_history_ansi: None,
+            terminal_snapshot: None,
+            terminal_snapshot_metadata: None,
             agent_state: None,
         }
     }
@@ -2511,6 +2602,7 @@ impl PaneRuntime {
         let crate::handoff_runtime::ImportedHandoffRuntime { master_fd, state } = import;
         let crate::handoff_runtime::HandoffRuntimeState {
             pane_id,
+            terminal_id: _,
             child_pid,
             rows,
             cols,
@@ -2521,6 +2613,8 @@ impl PaneRuntime {
             input_state,
             terminal_title,
             initial_history_ansi,
+            terminal_snapshot,
+            terminal_snapshot_metadata,
             agent_state: _,
         } = state;
         let pane_id = PaneId::from_raw(pane_id);
@@ -2529,31 +2623,63 @@ impl PaneRuntime {
         let master_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(master_fd) };
 
         let (response_tx, _response_rx) = mpsc::channel::<Bytes>(1);
-        let mut terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        terminal
-            .resize(cols, rows, cell_width_px, cell_height_px)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        if crate::kitty_graphics::is_enabled() {
-            terminal
-                .enable_kitty_graphics()
+        let has_snapshot = terminal_snapshot.is_some();
+        let terminal = if let Some(snapshot) = terminal_snapshot.as_deref() {
+            let mut terminal = crate::ghostty::Terminal::from_snapshot(snapshot)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
-        }
-        let pane_terminal = GhosttyPaneTerminal::new(terminal, response_tx.clone())?;
-        pane_terminal.apply_host_terminal_theme(host_terminal_theme);
-        let _ = pane_terminal.apply_host_terminal_appearance(host_terminal_appearance);
-        pane_terminal.seed_terminal_title(terminal_title);
-        if let Some(input_state) = input_state {
-            pane_terminal.seed_handoff_input_state(input_state);
-        }
-        if let Some(ansi) = keyboard_protocol_ansi.as_deref() {
-            pane_terminal.seed_keyboard_protocol_ansi(ansi);
+            if terminal.cols().ok() != Some(cols) || terminal.rows().ok() != Some(rows) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "terminal snapshot dimensions do not match transfer state",
+                ));
+            }
+            terminal.restore_snapshot_cell_size(cell_width_px, cell_height_px);
+            if terminal_snapshot_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.kitty_graphics_enabled)
+            {
+                terminal
+                    .enable_kitty_graphics()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+            }
+            terminal
         } else {
-            pane_terminal.seed_keyboard_protocol_flags(keyboard_protocol_flags);
+            let mut terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            terminal
+                .resize(cols, rows, cell_width_px, cell_height_px)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            if crate::kitty_graphics::is_enabled() {
+                terminal
+                    .enable_kitty_graphics()
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+            }
+            terminal
+        };
+        let pane_terminal = GhosttyPaneTerminal::new(terminal, response_tx.clone())?;
+        if has_snapshot {
+            pane_terminal.seed_workspace_transfer_metadata(
+                terminal_snapshot_metadata,
+                terminal_title,
+                keyboard_protocol_ansi.as_deref(),
+                host_terminal_theme,
+            )?;
+        } else {
+            pane_terminal.apply_host_terminal_theme(host_terminal_theme);
+            pane_terminal.seed_terminal_title(terminal_title);
+            if let Some(input_state) = input_state {
+                pane_terminal.seed_handoff_input_state(input_state);
+            }
+            if let Some(ansi) = keyboard_protocol_ansi.as_deref() {
+                pane_terminal.seed_keyboard_protocol_ansi(ansi);
+            } else {
+                pane_terminal.seed_keyboard_protocol_flags(keyboard_protocol_flags);
+            }
+            if let Some(ansi) = initial_history_ansi.as_deref() {
+                pane_terminal.seed_history_ansi(ansi);
+            }
         }
-        if let Some(ansi) = initial_history_ansi.as_deref() {
-            pane_terminal.seed_history_ansi(ansi);
-        }
+        let _ = pane_terminal.apply_host_terminal_appearance(host_terminal_appearance);
         let terminal = Arc::new(PaneTerminal::new(pane_terminal));
         let compression = TerminalCompressionTask::spawn(pane_id, terminal.clone());
         let child_pid = Arc::new(AtomicU32::new(child_pid));
@@ -5215,6 +5341,258 @@ mod tests {
             &[("TERM", "vt100"), ("COLORTERM", "24bit")],
         );
         assert_eq!(output, "vt100\n24bit\n");
+    }
+
+    #[cfg(unix)]
+    fn workspace_transfer_test_runtime() -> (
+        PaneRuntime,
+        std::os::unix::net::UnixStream,
+        std::sync::mpsc::Receiver<Bytes>,
+    ) {
+        use std::os::fd::OwnedFd;
+        let (mut runtime, _) = PaneRuntime::test_with_channel(80, 6);
+        let (response_tx, _response_rx) = mpsc::channel(1);
+        let mut terminal = crate::ghostty::Terminal::new(80, 6, 20_000_000).unwrap();
+        terminal.enable_kitty_graphics().unwrap();
+        runtime.terminal = Arc::new(PaneTerminal::new(
+            GhosttyPaneTerminal::new(terminal, response_tx.clone()).unwrap(),
+        ));
+        runtime.compression =
+            TerminalCompressionTask::spawn(runtime.pane_id, runtime.terminal.clone());
+        let terminal = runtime.terminal.clone();
+        let (socket, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (read_tx, read_rx) = std::sync::mpsc::channel();
+        runtime.io = PaneRuntimeIo::Actor(
+            PtyIoActor::spawn(PtyIoActorConfig {
+                pane_id: runtime.pane_id.raw(),
+                master_fd: OwnedFd::from(socket),
+                initially_quiesced: false,
+                on_read: Box::new(move |bytes| {
+                    let result =
+                        terminal.process_pty_bytes(PaneId::from_raw(0), 0, bytes, &response_tx);
+                    let _ = read_tx.send(Bytes::copy_from_slice(bytes));
+                    PtyReadResult {
+                        terminal_responses: result.terminal_responses,
+                    }
+                }),
+                on_reader_exit: None,
+            })
+            .unwrap(),
+        );
+        (runtime, peer, read_rx)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_transfer_roundtrip_preserves_full_terminal_before_ownership() {
+        use std::{io::Write, os::fd::IntoRawFd};
+        let (source, mut peer, _reads) = workspace_transfer_test_runtime();
+        for line in 0..500 {
+            source.test_process_pty_bytes(
+                format!("{line:04} history {}\r\n", "界é🙂".repeat(6)).as_bytes(),
+            );
+        }
+        let primary = source.recent_unwrapped_text_snapshot(usize::MAX).text;
+        assert!(primary.len() > 8192);
+        source.test_process_pty_bytes(b"\x1b[>1u\x1b[>5u\x1b[2;4H\x1b7\x1b[?1049h\x1b[2;3HALTERNATE\x1b7\x1b[4;7H\x1b[4 q\x1b[>9u\x1b[?2004h\x1b]2;transfer-title\x07\x1b]9;4;3;\x07\x1b]10;rgb:12/34/56\x07");
+        let handle = source.workspace_transfer_handle(12).unwrap();
+        let (state, fd) = handle.capture().unwrap();
+        assert!(state.initial_history_ansi.is_none());
+        assert!(state.terminal_snapshot.as_ref().unwrap().len() > 8192);
+        assert!(
+            state
+                .terminal_snapshot_metadata
+                .as_ref()
+                .unwrap()
+                .kitty_graphics_enabled
+        );
+        let state = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        let (events, _event_rx) = mpsc::channel(16);
+        let mut imported = PaneRuntime::from_handoff_fd(
+            crate::handoff_runtime::ImportedHandoffRuntime {
+                master_fd: fd.into_raw_fd(),
+                state,
+            },
+            64,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .unwrap();
+        assert!(imported.preserve_processes_on_drop);
+        let imported_state = imported
+            .terminal
+            .workspace_transfer_snapshot(12, 0)
+            .unwrap();
+        assert!(
+            imported_state
+                .terminal_snapshot_metadata
+                .unwrap()
+                .kitty_graphics_enabled
+        );
+        assert!(imported
+            .try_send_bytes(Bytes::from_static(b"blocked"))
+            .is_err());
+        assert!(source
+            .try_send_bytes(Bytes::from_static(b"blocked"))
+            .is_err());
+        assert_eq!(imported.terminal_title(), source.terminal_title());
+        assert_eq!(imported.agent_osc_title(), source.agent_osc_title());
+        assert_eq!(imported.agent_osc_progress(), source.agent_osc_progress());
+        assert_eq!(imported.input_state(), source.input_state());
+        assert_eq!(
+            imported.terminal.cursor_state(),
+            source.terminal.cursor_state()
+        );
+        assert_eq!(
+            imported.terminal.kitty_keyboard_state_ansi(),
+            source.terminal.kitty_keyboard_state_ansi()
+        );
+        for bytes in [
+            b"\x1b8!\x1b[<u".as_slice(),
+            b"\x1b[?1049l",
+            b"\x1b8saved\x1b[<u",
+        ] {
+            source.test_process_pty_bytes(bytes);
+            imported.test_process_pty_bytes(bytes);
+            assert_eq!(
+                imported.recent_unwrapped_ansi(usize::MAX),
+                source.recent_unwrapped_ansi(usize::MAX)
+            );
+            assert_eq!(
+                imported.terminal.cursor_state(),
+                source.terminal.cursor_state()
+            );
+            assert_eq!(imported.keyboard_protocol(), source.keyboard_protocol());
+        }
+        let restored_primary = imported.recent_unwrapped_text_snapshot(usize::MAX).text;
+        assert!(restored_primary.len() > 8192);
+        assert!(restored_primary.contains("0000 history"));
+        assert!(restored_primary.contains("0499 history"));
+        source.preserve_for_handoff();
+        imported.assume_handoff_ownership();
+        assert!(!imported.preserve_processes_on_drop);
+        imported.set_handoff_reader_paused(false);
+        peer.write_all(b"new-output").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !imported.recent_text_snapshot(6).text.contains("new-output") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_transfer_captures_unfinished_legacy_query_without_losing_source_state() {
+        let (source, _peer, _reads) = workspace_transfer_test_runtime();
+        source.test_process_pty_bytes(b"source intact \x90+q");
+        let before = source.recent_text_snapshot(6).text;
+        let handle = source.workspace_transfer_handle(12).unwrap();
+        let (state, fd) = handle.capture().unwrap();
+        assert!(state
+            .terminal_snapshot_metadata
+            .unwrap()
+            .legacy_query
+            .is_some());
+        assert_eq!(source.recent_text_snapshot(6).text, before);
+        drop(fd);
+        handle.rollback().unwrap();
+        source.test_process_pty_bytes(b"5463\x9c");
+        let (_, fd) = handle.capture().unwrap();
+        drop(fd);
+        handle.rollback().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_transfer_rejected_snapshot_keeps_source_intact_until_explicit_rollback() {
+        use std::io::Write;
+        let (source, mut peer, reads) = workspace_transfer_test_runtime();
+        source.test_process_pty_bytes(b"intact \x1b[31");
+        let before = source.recent_text_snapshot(6).text;
+        let handle = source.workspace_transfer_handle(12).unwrap();
+        let clone = handle.clone();
+        assert!(handle.capture().is_err());
+        assert_eq!(source.recent_text_snapshot(6).text, before);
+        assert!(source
+            .try_send_bytes(Bytes::from_static(b"blocked"))
+            .is_err());
+        drop(handle);
+        peer.write_all(b"mred").unwrap();
+        assert!(reads
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+        clone.rollback().unwrap();
+        assert_eq!(
+            reads
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+            Bytes::from_static(b"mred")
+        );
+        assert!(source.recent_text_snapshot(6).text.contains("intact red"));
+        let (_, fd) = clone.capture().unwrap();
+        drop(fd);
+        drop(clone);
+        assert!(source
+            .try_send_bytes(Bytes::from_static(b"still-blocked"))
+            .is_err());
+        source.io.set_handoff_paused(false).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_transfer_invalid_snapshot_import_never_falls_back_to_ansi() {
+        use std::os::fd::IntoRawFd;
+        let (source, _peer, _reads) = workspace_transfer_test_runtime();
+        source.test_process_pty_bytes(b"source intact");
+        let handle = source.workspace_transfer_handle(12).unwrap();
+        let (mut state, fd) = handle.capture().unwrap();
+        state.terminal_snapshot.as_mut().unwrap().push(0);
+        state.initial_history_ansi = Some("lossy fallback must not run".to_owned());
+        let (events, _event_rx) = mpsc::channel(16);
+        assert!(PaneRuntime::from_handoff_fd(
+            crate::handoff_runtime::ImportedHandoffRuntime {
+                master_fd: fd.into_raw_fd(),
+                state
+            },
+            4096,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .is_err());
+        handle.rollback().unwrap();
+        assert!(source
+            .recent_text_snapshot(6)
+            .text
+            .contains("source intact"));
+        assert!(source
+            .try_send_bytes(Bytes::from_static(b"resumed"))
+            .is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_transfer_control_handle_does_not_own_runtime_lifetime() {
+        let (mut source, _peer, reads) = workspace_transfer_test_runtime();
+        let handle = source.workspace_transfer_handle(12).unwrap();
+        source.set_transfer_drop_protection(true);
+        assert!(source.preserve_processes_on_drop);
+        source.set_transfer_drop_protection(false);
+        assert!(!source.preserve_processes_on_drop);
+        drop(source);
+        assert!(matches!(
+            reads.recv_timeout(std::time::Duration::from_secs(1)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        ));
+        assert!(handle.capture().is_err());
+        handle.rollback().unwrap();
     }
 
     #[cfg(unix)]

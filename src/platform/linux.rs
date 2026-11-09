@@ -9,6 +9,18 @@ use std::{
 
 pub(super) const REMOTE_BRIDGE_CLOCK: libc::clockid_t = libc::CLOCK_BOOTTIME;
 
+pub(crate) fn workspace_transfer_domain() -> std::io::Result<String> {
+    use std::os::unix::fs::MetadataExt;
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+    let pid_namespace = std::fs::metadata("/proc/self/ns/pid")?.ino();
+    let user_namespace = std::fs::metadata("/proc/self/ns/user")?.ino();
+    Ok(format!(
+        "linux:{}:{}:{pid_namespace}:{user_namespace}",
+        boot.trim(),
+        unsafe { libc::geteuid() }
+    ))
+}
+
 use super::{ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess, Signal};
 
 mod clipboard;

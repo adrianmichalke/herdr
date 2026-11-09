@@ -100,7 +100,7 @@ Raw socket method names use dot notation:
 | Notification | `notification.show` |
 | Client | `client.window_title.set`, `client.window_title.clear` |
 | Session | `session.snapshot` |
-| Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
+| Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.transfer`, `workspace.transfer.status`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
@@ -114,6 +114,17 @@ Raw socket method names use dot notation:
 `agent.wait` is server-owned and event-driven. It pins the resolved pane occupant so a replacement cannot satisfy the wait. `agent.prompt` accepts an optional `wait` object with `until` and `timeout_ms`; this submits the prompt and starts the wait in one request, avoiding a race between separate calls. If the resolved agent is already `blocked`, `agent.prompt` returns `agent_blocked` without sending input or starting the wait.
 
 `workspace.move_block` atomically moves the ordered `workspace_ids` before `before_workspace_id`; omit the anchor to move the block to the end. The ids must be unique and the anchor cannot be part of the block. The response contains the authoritative ordered workspace list.
+
+`workspace.transfer` moves one entire live workspace, including every tab and pane, to another session on the same Unix machine. A stopped destination is started and restored automatically. Processes are not restarted. Terminal IDs, public pane/tab numbers, layouts, focus, names, cwd, metadata, and plugin-pane associations travel with the workspace; its destination workspace ID may change to avoid collisions. Unsupported platforms, incompatible server builds, unsupported terminal states, and conflicting identities/names fail safely without a restart fallback. Only the moving workspace is fenced against mutation and input.
+
+```json
+{"id":"move","method":"workspace.transfer","params":{"workspace_id":"w1","destination_session":"build","transfer_id":"21000000-0000-4000-8000-000000000001"}}
+{"id":"poll","method":"workspace.transfer.status","params":{"transfer_id":"21000000-0000-4000-8000-000000000001"}}
+```
+
+Submission returns `result.type: "workspace_transfer"` with `transfer.state: "pending"` immediately. Poll the **source endpoint** for `committed` or `failed`. Repeating the same UUID and parameters is idempotent; reusing it with different parameters is rejected. A committed result supplies the canonical destination `workspace_id`, `focused_tab_id`, and `focused_pane_id`. A precommit failure resumes the source. An uncertain ownership outcome remains pending: do not treat a timeout as failure, cancel a submitted move, or retry it under a new UUID.
+
+Keep the source server running: live children retain their original socket and IDs. Its durable forwarding registry routes explicit inherited pane/workspace/tab targets and pinned agent names to the destination, including targeted waits and subscriptions, while responses/events retain the source namespace. Prompt text, argv, environment, tokens, and paths are never rewritten. Requests mixing local and transferred-session targets are rejected. Forwarding is bounded to eight transfers in a workspace's live routing lineage; a further move is rejected before ownership changes. Forwarding and reserved old workspace numbers survive an empty-source save and source restart; session-wide listings and server controls remain local.
 
 `session.snapshot` returns a one-time bootstrap snapshot for clients that keep
 their own local runtime cache. The response includes version/protocol metadata,

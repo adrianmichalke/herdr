@@ -1,0 +1,58 @@
+diff --git a/vendor/libghostty-vt/include/ghostty/vt/terminal.h b/vendor/libghostty-vt/include/ghostty/vt/terminal.h
+index 6404af53..d61e26d2 100644
+--- a/vendor/libghostty-vt/include/ghostty/vt/terminal.h
++++ b/vendor/libghostty-vt/include/ghostty/vt/terminal.h
+@@ -1600,6 +1600,7 @@ typedef enum GHOSTTY_ENUM_TYPED {
+ typedef enum GHOSTTY_ENUM_TYPED {
+   /** Invalid data type. Never results in any data extraction. */
+   GHOSTTY_TERMINAL_DATA_INVALID = 0,
++  GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS_STATE = 42,
+
+   /**
+    * Terminal width in cells.
+diff --git a/vendor/libghostty-vt/src/terminal/c/terminal.zig b/vendor/libghostty-vt/src/terminal/c/terminal.zig
+index e825183e..a1016c7d 100644
+--- a/vendor/libghostty-vt/src/terminal/c/terminal.zig
++++ b/vendor/libghostty-vt/src/terminal/c/terminal.zig
+@@ -1577,6 +1577,7 @@ pub const TerminalScrollbar = PageList.Scrollbar.C;
+ /// C: GhosttyTerminalData
+ pub const TerminalData = enum(c_int) {
+     invalid = 0,
++    kitty_graphics_state = 42,
+     cols = 1,
+     rows = 2,
+     cursor_x = 3,
+@@ -1623,6 +1624,7 @@ pub const TerminalData = enum(c_int) {
+     pub fn OutType(comptime self: TerminalData) type {
+         return switch (self) {
+             .invalid => void,
++            .kitty_graphics_state => bool,
+             .cols, .rows, .cursor_x, .cursor_y => size.CellCountInt,
+             .cursor_pending_wrap,
+             .cursor_visible,
+@@ -1720,6 +1722,25 @@ fn getTyped(
+     const t: *ZigTerminal = wrapper.terminal;
+     switch (data) {
+         .invalid => return .invalid_value,
++        .kitty_graphics_state => {
++            out.* = false;
++            if (comptime build_options.kitty_graphics) {
++                for ([_]ScreenSet.Key{ .primary, .alternate }) |key| {
++                    if (t.screens.get(key)) |screen| {
++                        const storage = &screen.kitty_images;
++                        const defaults: @TypeOf(storage.*) = .{};
++                        if (storage.loading != null or storage.images.count() != 0 or
++                            storage.placements.count() != 0 or
++                            storage.next_image_id != defaults.next_image_id or
++                            storage.next_internal_placement_id != defaults.next_internal_placement_id)
++                        {
++                            out.* = true;
++                            break;
++                        }
++                    }
++                }
++            }
++        },
+         .cols => out.* = t.cols,
+         .rows => out.* = t.rows,
+         .cursor_x => out.* = t.screens.active.cursor.x,

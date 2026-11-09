@@ -272,3 +272,41 @@ verification:
 (cd vendor/libghostty-vt && zig build test-lib-vt -Dtest-filter='cursorAbsolute keeps the hyperlink when style migration splits the page')
 just maintenance-test
 ```
+
+## 0009 query retained Kitty graphics state across both screens
+
+status: active
+
+patch: `vendor/patches/libghostty-vt/0009-query-kitty-graphics-state.patch`
+
+herdr issue: https://github.com/adrianmichalke/herdr/issues/2
+
+upstream discussion: not opened
+
+upstream pr: not opened
+
+vendored base: `44f2a44df7e8c4a0c6df3f7d872ef3d7ead88e51`
+
+local files:
+
+- `vendor/libghostty-vt/include/ghostty/vt/terminal.h`
+- `vendor/libghostty-vt/src/terminal/c/terminal.zig`
+
+reason: The binary terminal snapshot excludes image storage and placements.
+Workspace transfer must reject retained or unfinished graphics on either screen,
+including images hidden behind an active alternate screen. A nonzero storage
+capacity alone does not imply image state: ordinary panes enable graphics before
+receiving any image. This read-only query checks retained/loading state and image
+ID counters without changing screens, writing VT input, or adding hot-path work.
+The local query uses value 42.
+
+remove when: the public snapshot codec preserves complete graphics state, or the
+vendored API provides an equivalent nonmutating all-screen query.
+
+verification:
+
+```sh
+just test-one snapshot
+just test-one workspace_transfer
+just maintenance-test
+```

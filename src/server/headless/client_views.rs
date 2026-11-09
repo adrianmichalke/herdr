@@ -579,6 +579,9 @@ impl HeadlessServer {
         let area = Rect::new(0, 0, cols, rows);
         if self.app_client_count() == 1 {
             for (workspace_index, workspace) in self.app.state.workspaces.iter().enumerate() {
+                if self.app.state.workspace_transfer_fenced(workspace_index) {
+                    continue;
+                }
                 for tab_index in 0..workspace.tabs.len() {
                     crate::ui::resize_tab_surface(
                         &self.app.state,
@@ -596,7 +599,10 @@ impl HeadlessServer {
                 &self.app.terminal_runtimes,
                 Some(target),
                 area,
-                true,
+                !self
+                    .app
+                    .state
+                    .workspace_transfer_fenced(target.workspace_index),
                 cell_size,
             );
         }
@@ -907,11 +913,42 @@ impl HeadlessServer {
         changed | geometry_changed
     }
 
+    pub(super) fn client_request_is_transfer_fenced(
+        &self,
+        client_id: u64,
+        request: &api::schema::Request,
+    ) -> bool {
+        if self.app.state.workspace_transfer_fences.is_empty() {
+            return false;
+        }
+        self.app.transfer_request_is_fenced_at(
+            request,
+            self.shell_target_for_client(client_id)
+                .map(|target| target.workspace_index),
+        )
+    }
+
     pub(super) fn handle_client_shell_api_request(
         &mut self,
         client_id: u64,
         msg: api::ApiRequestMessage,
     ) -> bool {
+        if self.client_request_is_transfer_fenced(client_id, &msg.request) {
+            let _ = msg
+                .respond_to
+                .send(crate::server::workspace_transfer::error_response(
+                    msg.request.id,
+                    "workspace_busy",
+                    "workspace is being transferred; retry after the move completes",
+                ));
+            return false;
+        }
+        if matches!(
+            msg.request.method,
+            api::schema::Method::WorkspaceTransferStatus(_)
+        ) {
+            return self.handle_api_request_with_shutdown_check_inner(msg, false, true);
+        }
         let focus_before = self.shell_focus_target(client_id);
         let focused_tabs_before = self.focused_shell_tabs();
         let method_claims_geometry = Self::shell_endpoint_claims_geometry(&msg.request.method);

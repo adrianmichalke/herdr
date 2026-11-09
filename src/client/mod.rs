@@ -1998,6 +1998,28 @@ async fn run_client_loop(
                         let Some(completed) = completed else {
                             continue;
                         };
+                        if session_switch::SessionSwitchCoordinator::is_transfer_result(&completed)
+                        {
+                            if let Some(options) =
+                                session_switch::connect_options(&state, config.endpoint_keybindings)
+                            {
+                                session_switch.receive_transfer_result(
+                                    completed,
+                                    &mut session_switch::SessionSwitchContext {
+                                        state: &mut state,
+                                        endpoints: &mut write_stream,
+                                        commands: &mut endpoint_commands,
+                                        supervisors: &mut supervisors,
+                                        catalog: &mut endpoint_catalog,
+                                        activation: &mut pending_activation,
+                                        next_surface_serial: &mut next_surface_serial,
+                                        event_tx: &event_tx,
+                                        options,
+                                    },
+                                )?;
+                            }
+                            continue;
+                        }
                         let (repaint, actions) = state.shell.as_mut().map_or_else(
                             || (false, Vec::new()),
                             |shell| {
@@ -2398,10 +2420,35 @@ async fn run_client_loop(
                             write_stream.accepts(&expired.endpoint_id, expired.generation)
                         })
                         .collect::<Vec<_>>();
+                    let mut shell_expired = Vec::new();
+                    for expired in expired_endpoints {
+                        if session_switch::SessionSwitchCoordinator::is_transfer_result(&expired) {
+                            if let Some(options) =
+                                session_switch::connect_options(&state, config.endpoint_keybindings)
+                            {
+                                session_switch.receive_transfer_result(
+                                    expired,
+                                    &mut session_switch::SessionSwitchContext {
+                                        state: &mut state,
+                                        endpoints: &mut write_stream,
+                                        commands: &mut endpoint_commands,
+                                        supervisors: &mut supervisors,
+                                        catalog: &mut endpoint_catalog,
+                                        activation: &mut pending_activation,
+                                        next_surface_serial: &mut next_surface_serial,
+                                        event_tx: &event_tx,
+                                        options,
+                                    },
+                                )?;
+                            }
+                        } else {
+                            shell_expired.push(expired);
+                        }
+                    }
                     let (effects, outcome, frame) = {
                         let shell = state.shell.as_mut().expect("checked shell mode");
                         let mut outcome = shell.tick_selection_autoscroll(now);
-                        for expired in expired_endpoints {
+                        for expired in shell_expired {
                             if !shell.endpoint_is_active(&expired.endpoint_id) {
                                 continue;
                             }

@@ -2,6 +2,9 @@ use super::super::sessions::SessionPickerOverlay;
 use super::*;
 use crate::input::{TerminalKey, TextCommit};
 
+#[path = "workspace_transfer.rs"]
+mod workspace_transfer;
+
 fn shell() -> ClientShellState {
     let mut config = ClientShellConfig::from_config(&Config::default());
     config.initial_session_name = "source".to_owned();

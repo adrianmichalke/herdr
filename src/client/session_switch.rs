@@ -6,6 +6,10 @@ use endpoint::{ClientEndpointId, EndpointSessionTarget, ProfileId, SavedSshEndpo
 const PREPARATION_TIMEOUT: Duration = Duration::from_secs(120);
 const METADATA_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[path = "workspace_transfer.rs"]
+mod workspace_transfer;
+use workspace_transfer::{TransferFollow, WorkspaceTransfer};
+
 #[derive(Debug)]
 pub(super) enum SessionAction {
     List {
@@ -17,6 +21,11 @@ pub(super) enum SessionAction {
         request_id: u64,
         session: String,
         create: bool,
+    },
+    Transfer {
+        source: shell::WorkspaceTransferSource,
+        request_id: u64,
+        destination_session: String,
     },
     Cancel {
         request_id: u64,
@@ -160,12 +169,15 @@ struct Preparation {
     cancelled: Arc<AtomicBool>,
     phase: PreparationPhase,
     deadline: Instant,
+    follow: Option<TransferFollow>,
+    activation_serial: Option<u64>,
 }
 
 struct QueuedOpen {
     key: SessionRequestKey,
     session: String,
     create: bool,
+    follow: Option<TransferFollow>,
 }
 
 pub(super) struct SessionSwitchCoordinator {
@@ -176,6 +188,7 @@ pub(super) struct SessionSwitchCoordinator {
     discovery: Option<Discovery>,
     preparation: Option<Preparation>,
     queued: Option<QueuedOpen>,
+    transfer: Option<WorkspaceTransfer>,
 }
 
 impl Default for SessionSwitchCoordinator {
@@ -188,6 +201,7 @@ impl Default for SessionSwitchCoordinator {
             discovery: None,
             preparation: None,
             queued: None,
+            transfer: None,
         }
     }
 }
@@ -375,6 +389,9 @@ impl SessionSwitchCoordinator {
     }
 
     pub(super) fn cancel_for_navigation(&mut self, context: &mut SessionSwitchContext<'_>) {
+        if let Some(shell) = context.state.shell.as_mut() {
+            shell.note_session_navigation();
+        }
         if let Some(queued) = self.queued.take() {
             context.finish(
                 queued.key.request_id,
@@ -398,6 +415,18 @@ impl SessionSwitchCoordinator {
         for action in actions {
             match action {
                 SessionAction::Cancel { request_id } => self.cancel(request_id, context),
+                SessionAction::Transfer {
+                    source,
+                    request_id,
+                    destination_session,
+                } => {
+                    if request_id <= self.latest_serial {
+                        continue;
+                    }
+                    self.latest_serial = request_id;
+                    self.cancel_discovery();
+                    self.start_transfer(source, request_id, destination_session, context);
+                }
                 SessionAction::List {
                     machine,
                     request_id,
@@ -484,6 +513,7 @@ impl SessionSwitchCoordinator {
                         },
                         session,
                         create,
+                        follow: None,
                     });
                 }
             }
@@ -544,6 +574,17 @@ impl SessionSwitchCoordinator {
 
     fn start(&mut self, queued: QueuedOpen, context: &mut SessionSwitchContext<'_>) {
         let request_id = queued.key.request_id;
+        if queued
+            .follow
+            .as_ref()
+            .is_some_and(|follow| !follow.is_current(request_id, false, context))
+        {
+            context.finish(
+                request_id,
+                Err("The view changed; open the destination session manually".into()),
+            );
+            return;
+        }
         if !queued.key.is_current(context)
             || self
                 .fingerprint(&queued.key.fingerprint.machine, context)
@@ -600,6 +641,8 @@ impl SessionSwitchCoordinator {
                     cancelled: Arc::new(AtomicBool::new(false)),
                     phase: PreparationPhase::Metadata,
                     deadline: Instant::now() + METADATA_TIMEOUT,
+                    follow: queued.follow,
+                    activation_serial: None,
                 });
                 return;
             }
@@ -637,6 +680,8 @@ impl SessionSwitchCoordinator {
             cancelled: Arc::clone(&cancelled),
             phase: PreparationPhase::Preparing,
             deadline: Instant::now() + PREPARATION_TIMEOUT,
+            follow: queued.follow,
+            activation_serial: None,
         });
         let options = context.options;
         let root_profile = self.root_profile.clone();
@@ -678,6 +723,15 @@ impl SessionSwitchCoordinator {
         });
     }
 
+    pub(super) fn receive_transfer_result(
+        &mut self,
+        completed: endpoint_commands::EndpointCommandResult,
+        context: &mut SessionSwitchContext<'_>,
+    ) -> Result<(), ClientError> {
+        self.receive_transfer(completed, context);
+        self.drive(context)
+    }
+
     pub(super) fn receive(
         &mut self,
         event: SessionSwitchEvent,
@@ -715,10 +769,16 @@ impl SessionSwitchCoordinator {
                 }) {
                     return Ok(());
                 }
-                let result = if key.is_current(context) {
+                let follow_current = self.preparation.as_ref().is_some_and(|preparation| {
+                    preparation
+                        .follow
+                        .as_ref()
+                        .is_none_or(|follow| follow.is_current(key.request_id, false, context))
+                });
+                let result = if key.is_current(context) && follow_current {
                     result
                 } else {
-                    Err("The selected machine configuration changed".into())
+                    Err("The selected machine or view changed; open the session manually".into())
                 };
                 match result {
                     Ok(endpoint::EndpointSupervisorEvent::Connected {
@@ -769,17 +829,28 @@ impl SessionSwitchCoordinator {
         &mut self,
         context: &mut SessionSwitchContext<'_>,
     ) -> Result<(), ClientError> {
-        if let Some((endpoint_id, generation, result)) = context.state.activation_completion.take()
+        self.drive_transfer(context);
+        if let Some((endpoint_id, generation, serial, result)) =
+            context.state.activation_completion.take()
         {
             if self.preparation.as_ref().is_some_and(|preparation| {
                 preparation.endpoint_id == endpoint_id
                     && preparation.generation == generation
                     && preparation.phase == PreparationPhase::Activating
+                    && preparation.activation_serial == Some(serial)
             }) {
                 let preparation = self.preparation.take().expect("matched session activation");
                 let request_id = preparation.key.request_id;
                 let committed = result.is_ok()
                     && !preparation.cancelled.load(Ordering::Acquire)
+                    && preparation
+                        .follow
+                        .as_ref()
+                        .is_none_or(|follow| follow.is_current(request_id, true, context))
+                    && preparation.key.is_current(context)
+                    && self
+                        .fingerprint(&preparation.key.fingerprint.machine, context)
+                        .is_ok()
                     && context.endpoints.active_id() == &endpoint_id
                     && context
                         .endpoints
@@ -837,6 +908,25 @@ impl SessionSwitchCoordinator {
                 }
             }
         }
+        let stale_follow = self.preparation.as_ref().is_some_and(|preparation| {
+            preparation.follow.as_ref().is_some_and(|follow| {
+                !follow.is_current(
+                    preparation.key.request_id,
+                    preparation.phase == PreparationPhase::Activating,
+                    context,
+                )
+            })
+        });
+        if stale_follow {
+            if let Some(preparation) = &self.preparation {
+                let request_id = preparation.key.request_id;
+                self.cancel(request_id, context);
+                context.finish(
+                    request_id,
+                    Err("The view changed; open the destination session manually".into()),
+                );
+            }
+        }
         if let Some(preparation) = &self.preparation {
             if preparation.phase == PreparationPhase::Activating {
                 if context.activation.is_none() {
@@ -887,17 +977,24 @@ impl SessionSwitchCoordinator {
                     context.state.reported_cell_size.1,
                     context.state.pixel_mouse_available(),
                 );
+                let activation_serial = *context.next_surface_serial;
                 let activation = endpoint::PendingEndpointActivation::prepare(
                     shell,
                     context.endpoints,
                     preparation.endpoint_id.clone(),
-                    None,
+                    preparation
+                        .follow
+                        .as_ref()
+                        .map(|follow| follow.target.clone()),
                     resize,
                     *context.next_surface_serial,
                     Instant::now(),
                 )
                 .map(endpoint::PendingEndpointActivation::for_session_switch)
                 .and_then(|activation| activation.start(context.endpoints));
+                if let Some(preparation) = self.preparation.as_mut() {
+                    preparation.activation_serial = Some(activation_serial);
+                }
                 match activation {
                     Ok(activation) => {
                         install_pending_activation(

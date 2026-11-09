@@ -96,7 +96,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | 通知 | `notification.show` |
 | 客户端 | `client.window_title.set`、`client.window_title.clear` |
 | 会话 | `session.snapshot` |
-| 工作区 | `workspace.create`、`workspace.list`、`workspace.get`、`workspace.focus`、`workspace.rename`、`workspace.move`、`workspace.move_block`、`workspace.report_metadata`、`workspace.close` |
+| 工作区 | `workspace.create`、`workspace.list`、`workspace.get`、`workspace.focus`、`workspace.rename`、`workspace.move`、`workspace.move_block`、`workspace.transfer`、`workspace.transfer.status`、`workspace.report_metadata`、`workspace.close` |
 | Worktree | `worktree.list`、`worktree.create`、`worktree.open`、`worktree.remove` |
 | 标签页 | `tab.create`、`tab.list`、`tab.get`、`tab.focus`、`tab.rename`、`tab.move`、`tab.close` |
 | 窗格 | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.close`、`pane.wait_for_output` |
@@ -110,6 +110,17 @@ herdr pane read w1:p2 --source recent --lines 50
 `agent.wait` 由服务器拥有并由事件驱动。它会固定到已解析的窗格占用者,因此替换后的智能体不能满足该等待。`agent.prompt` 接受可选的 `wait` 对象,其中包含 `until` 和 `timeout_ms`;这样可在一个请求中提交提示并开始等待,避免两个独立调用之间的竞态。如果解析出的智能体已经是 `blocked`,`agent.prompt` 不会发送输入或开始等待,而是返回 `agent_blocked`。
 
 `workspace.move_block` 会将有序的 `workspace_ids` 原子地移动到 `before_workspace_id` 之前;省略锚点则将该块移动到末尾。id 必须唯一,且锚点不能属于被移动的块。响应包含服务器确认的有序工作区列表。
+
+`workspace.transfer` 将一个正在运行的完整工作区（包括所有标签页和窗格）移动到同一台 Unix 机器上的另一个会话。已停止的目标会话会自动启动并恢复。进程不会重启。终端 ID、公开窗格/标签页编号、布局、焦点、名称、cwd、元数据和插件窗格关联均会保留;为避免冲突,目标工作区 ID 可能改变。不支持的平台、不兼容的服务器构建、不支持的终端状态以及 ID/名称冲突会安全失败,不会退回到重启进程的方式。只有正在移动的工作区会暂停接受修改和输入。
+
+```json
+{"id":"move","method":"workspace.transfer","params":{"workspace_id":"w1","destination_session":"build","transfer_id":"21000000-0000-4000-8000-000000000001"}}
+{"id":"poll","method":"workspace.transfer.status","params":{"transfer_id":"21000000-0000-4000-8000-000000000001"}}
+```
+
+提交会立即返回 `result.type: "workspace_transfer"` 和 `transfer.state: "pending"`。请轮询**来源端点**以获取 `committed` 或 `failed`。相同 UUID 和参数的重复提交是幂等的;用相同 UUID 提交不同参数会被拒绝。提交完成后会返回目标的规范 `workspace_id`、`focused_tab_id` 和 `focused_pane_id`。提交所有权前失败会恢复来源读取。所有权结果不确定时仍保持 pending:不要把超时视为失败,不要取消已提交的移动,也不要换一个 UUID 重试。
+
+请保持来源服务器运行:已有子进程仍保留原始套接字和 ID。持久化转发注册表会把显式指定的原始窗格/工作区/标签页 ID 和已固定的智能体名称路由到目标,也支持指定对象的等待和订阅;响应和事件的 ID 仍属于来源命名空间。提示文本、argv、环境变量、令牌和路径绝不会被改写。混合本地与已转移会话目标的请求会被拒绝。运行中工作区的转发链最多支持八次移动;超出限制的移动会在所有权变更前被拒绝。来源工作区为空时保存或重启来源服务器后,转发信息和旧工作区编号的保留仍然有效。会话全局列表与服务器控制仍在本地执行。
 
 `session.snapshot` 为维护本地运行时缓存的客户端返回一次性引导快照。响应包含版本/协议元数据、当前聚焦的工作区/标签页/窗格 id、工作区记录、标签页记录、窗格记录、标签页布局快照和智能体记录。它不是订阅。初始化或恢复缓存时,应先建立订阅,再按下文事件订阅部分的说明读取服务器当前状态并核对、更新缓存。事件表示缓存可能过期,不能无条件重放到快照上。重新连接后或本地缓存可能已过期时,再次调用 `session.snapshot`。工作区记录也包含关联 worktree 的来源信息。完整的仓库 worktree 发现仍使用 `worktree.list`。
 

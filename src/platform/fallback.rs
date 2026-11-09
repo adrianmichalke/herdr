@@ -14,6 +14,14 @@ pub(crate) fn set_default_plugin_pane_pwd(
 }
 
 #[cfg(unix)]
+pub(crate) fn workspace_transfer_domain() -> std::io::Result<String> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "workspace transfer runtime identity is unavailable on this platform",
+    ))
+}
+
+#[cfg(unix)]
 pub(super) fn socket_peer_pid(_fd: std::os::fd::RawFd) -> Option<u32> {
     None
 }

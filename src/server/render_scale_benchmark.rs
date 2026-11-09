@@ -665,6 +665,29 @@ fn print_agent_activity_profiles() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "manual workspace transfer layout profile"]
+async fn workspace_transfer_render_scale_profile() {
+    for (label, build) in [
+        (
+            "background workspaces",
+            workspaces as fn(usize) -> Vec<Workspace>,
+        ),
+        ("active panes", active_panes),
+    ] {
+        let rows = [1, 15].map(|count| {
+            let stats = profile(build, count);
+            println!(
+                "{label} count={count} server_us={} client_us={} combined_us={}",
+                stats.server.median_us, stats.client.median_us, stats.total.median_us
+            );
+            (count, stats)
+        });
+        println!("{label}");
+        print_stage("combined pipeline", &rows, |stats| stats.total);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 #[ignore = "manual client-rendered pipeline scaling profile"]
 async fn render_scale_profile() {
     print_profiles("background workspaces (one pane each)", workspaces);
