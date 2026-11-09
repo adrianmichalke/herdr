@@ -184,6 +184,15 @@ impl ClientShellState {
                 self.hits.worktree_rows = rendered.worktree_rows;
                 cursor = rendered.cursor;
             }
+        } else if let Some(ClientShellOverlay::TabMove(picker)) = self.overlay.as_ref() {
+            if let Some(rendered) =
+                render::render_tab_move_overlay(&mut buffer, picker, &self.config.palette)
+            {
+                self.hits.overlay_primary = rendered.primary;
+                self.hits.overlay_cancel = rendered.cancel;
+                self.hits.navigator_popup = rendered.navigator_popup;
+                self.hits.tab_move_rows = rendered.tab_move_rows;
+            }
         } else if let Some(ClientShellOverlay::GlobalMenu(menu)) = self.overlay.as_ref() {
             if let Some(rendered) = render::render_global_menu(
                 &mut buffer,
@@ -761,6 +770,7 @@ impl ClientShellState {
                 self.hits.navigator_scroll_metrics = rendered.navigator_scroll_metrics;
                 self.hits.worktree_search = rendered.worktree_search;
                 self.hits.worktree_rows = rendered.worktree_rows;
+                self.hits.tab_move_rows = rendered.tab_move_rows;
                 self.hits.help_popup = rendered.help_popup;
                 self.hits.help_scrollbar = rendered.help_scrollbar;
                 self.hits.help_scroll_metrics = rendered.help_scroll_metrics;

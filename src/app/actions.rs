@@ -651,6 +651,7 @@ impl AppState {
         pane_ids: impl IntoIterator<Item = PaneId>,
     ) {
         let pane_ids = pane_ids.into_iter().collect::<Vec<_>>();
+        self.remove_pane_aliases(pane_ids.iter().copied());
         if self
             .previous_pane_focus
             .as_ref()

@@ -1,7 +1,8 @@
 use clap::Command;
 
 use crate::api::schema::tabs::{
-    tab_id, TabCreateProjection, TabListProjection, TabRenameProjection,
+    tab_id, TabCreateProjection, TabListProjection, TabMoveToWorkspaceProjection,
+    TabRenameProjection,
 };
 use crate::api::schema::{Method, Request, TabTarget};
 
@@ -13,7 +14,7 @@ cli_projection! {
     }
 }
 
-const LEAVES: [Leaf; 6] = [
+const LEAVES: [Leaf; 7] = [
     Leaf {
         name: "list",
         about: "List tabs",
@@ -48,6 +49,15 @@ const LEAVES: [Leaf; 6] = [
         id: "cli:tab:rename",
         arguments: TabRenameProjection::arguments,
         method: |matches| TabRenameProjection::from_matches(matches).map(Method::TabRename),
+    },
+    Leaf {
+        name: "move-to-workspace",
+        about: "Move a live tab to another workspace without focusing it",
+        id: "cli:tab:move-to-workspace",
+        arguments: TabMoveToWorkspaceProjection::arguments,
+        method: |matches| {
+            TabMoveToWorkspaceProjection::from_matches(matches).map(Method::TabMoveToWorkspace)
+        },
     },
     Leaf {
         name: "close",
@@ -136,6 +146,28 @@ mod tests {
         assert!(
             matches!(parse(&["create", "--env", "=value"]), Err(ParseError::Usage(message)) if message == "env key must not be empty")
         );
+    }
+
+    #[test]
+    fn tab_transfer_projection_requires_both_targets_and_has_no_focus_flag() {
+        let request = parse(&["move-to-workspace", "w1:t2", "--workspace", "w3"]).unwrap();
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            serde_json::json!({
+                "id":"cli:tab:move-to-workspace",
+                "method":"tab.move_to_workspace",
+                "params":{"tab_id":"w1:t2","workspace_id":"w3"}
+            })
+        );
+        for args in [
+            vec!["move-to-workspace"],
+            vec!["move-to-workspace", "w1:t2"],
+            vec!["move-to-workspace", "w1:t2", "--workspace"],
+            vec!["move-to-workspace", "w1:t2", "--workspace", "w3", "--focus"],
+            vec!["move-to-workspace", "w1:t2", "--workspace", "w3", "extra"],
+        ] {
+            assert!(parse(&args).is_err(), "{args:?}");
+        }
     }
 
     #[test]

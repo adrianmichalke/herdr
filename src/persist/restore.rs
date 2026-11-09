@@ -19,8 +19,8 @@ use super::snapshot::{
     WorkspaceHistorySnapshot,
 };
 use super::{
-    DirectionSnapshot, LayoutSnapshot, SessionHistorySnapshot, SessionSnapshot, TabSnapshot,
-    WorkspaceSnapshot,
+    DirectionSnapshot, LayoutSnapshot, RestoredPaneAliases, SessionHistorySnapshot,
+    SessionSnapshot, TabSnapshot, WorkspaceSnapshot,
 };
 
 struct AgentRestoreState<'a> {
@@ -68,10 +68,12 @@ type RestoredSession = (
     HashMap<TerminalId, TerminalState>,
     HashMap<TerminalId, TerminalRuntime>,
 );
+type RestoredSessionWithAliases = (RestoredSession, RestoredPaneAliases);
 type RestoredWorkspace = (
     Workspace,
     Vec<TerminalState>,
     HashMap<TerminalId, TerminalRuntime>,
+    Vec<(u32, PaneId)>,
 );
 type RestoredTab = (
     crate::workspace::Tab,
@@ -81,8 +83,8 @@ type RestoredTab = (
 );
 type RestoreFailures<T> = (T, usize);
 
-/// Restore workspaces from a snapshot. Each pane gets a fresh shell in its saved cwd.
-pub fn restore(
+#[cfg(test)]
+fn restore(
     snapshot: &SessionSnapshot,
     history: Option<&SessionHistorySnapshot>,
     rows: u16,
@@ -95,6 +97,35 @@ pub fn restore(
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
 ) -> RestoredSession {
+    restore_with_aliases(
+        snapshot,
+        history,
+        rows,
+        cols,
+        scrollback_limit_bytes,
+        default_shell,
+        shell_mode,
+        resume_agents_on_restore,
+        events,
+        render_notify,
+        render_dirty,
+    )
+    .0
+}
+
+pub(crate) fn restore_with_aliases(
+    snapshot: &SessionSnapshot,
+    history: Option<&SessionHistorySnapshot>,
+    rows: u16,
+    cols: u16,
+    scrollback_limit_bytes: usize,
+    default_shell: &str,
+    shell_mode: crate::config::ShellModeConfig,
+    resume_agents_on_restore: bool,
+    events: mpsc::Sender<AppEvent>,
+    render_notify: Arc<Notify>,
+    render_dirty: Arc<RenderSignal>,
+) -> RestoredSessionWithAliases {
     let mut imported_panes = HashMap::new();
     restore_with_imports(
         snapshot,
@@ -111,8 +142,8 @@ pub fn restore(
     )
 }
 
-#[cfg(unix)]
-pub fn restore_handoff(
+#[cfg(all(unix, test))]
+fn restore_handoff(
     snapshot: &SessionSnapshot,
     scrollback_limit_bytes: usize,
     default_shell: &str,
@@ -122,6 +153,30 @@ pub fn restore_handoff(
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
 ) -> std::io::Result<RestoredSession> {
+    restore_handoff_with_aliases(
+        snapshot,
+        scrollback_limit_bytes,
+        default_shell,
+        shell_mode,
+        imports,
+        events,
+        render_notify,
+        render_dirty,
+    )
+    .map(|(restored, _)| restored)
+}
+
+#[cfg(unix)]
+pub(crate) fn restore_handoff_with_aliases(
+    snapshot: &SessionSnapshot,
+    scrollback_limit_bytes: usize,
+    default_shell: &str,
+    shell_mode: crate::config::ShellModeConfig,
+    imports: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
+    events: mpsc::Sender<AppEvent>,
+    render_notify: Arc<Notify>,
+    render_dirty: Arc<RenderSignal>,
+) -> std::io::Result<RestoredSessionWithAliases> {
     restore_with_imports_strict(
         snapshot,
         None,
@@ -135,44 +190,6 @@ pub fn restore_handoff(
         render_notify,
         render_dirty,
     )
-}
-
-#[cfg(unix)]
-pub fn handoff_pane_aliases(
-    snapshot: &SessionSnapshot,
-    workspaces: &[Workspace],
-) -> HashMap<u32, PaneId> {
-    let mut aliases = HashMap::new();
-    for (ws_snap, workspace) in snapshot.workspaces.iter().zip(workspaces) {
-        for (tab_snap, tab) in ws_snap.tabs.iter().zip(&workspace.tabs) {
-            let old_ids = collect_snapshot_pane_ids(&tab_snap.layout);
-            let new_ids = tab.layout.pane_ids();
-            for (old_id, new_id) in old_ids.into_iter().zip(new_ids) {
-                if old_id != new_id.raw() {
-                    aliases.insert(old_id, new_id);
-                }
-            }
-        }
-    }
-    aliases
-}
-
-#[cfg(unix)]
-fn collect_snapshot_pane_ids(node: &LayoutSnapshot) -> Vec<u32> {
-    let mut ids = Vec::new();
-    collect_snapshot_ids_inner(node, &mut ids);
-    ids
-}
-
-#[cfg(unix)]
-fn collect_snapshot_ids_inner(node: &LayoutSnapshot, ids: &mut Vec<u32>) {
-    match node {
-        LayoutSnapshot::Pane(id) => ids.push(*id),
-        LayoutSnapshot::Split { first, second, .. } => {
-            collect_snapshot_ids_inner(first, ids);
-            collect_snapshot_ids_inner(second, ids);
-        }
-    }
 }
 
 fn migrated_public_pane_numbers_by_old_raw(
@@ -217,7 +234,7 @@ fn restore_with_imports_strict(
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
-) -> std::io::Result<RestoredSession> {
+) -> std::io::Result<RestoredSessionWithAliases> {
     let mut terminal_ids = HashSet::new();
     for imported in imported_panes.values() {
         if let Some(id) = &imported.state.terminal_id {
@@ -268,7 +285,7 @@ fn restore_with_imports(
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
-) -> RestoredSession {
+) -> RestoredSessionWithAliases {
     restore_with_imports_and_failures(
         snapshot,
         history,
@@ -297,7 +314,7 @@ fn restore_with_imports_and_failures(
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
-) -> RestoreFailures<RestoredSession> {
+) -> RestoreFailures<RestoredSessionWithAliases> {
     let history = history.filter(|history| {
         let matches = history.layout_fingerprint.is_some()
             && history.layout_fingerprint == super::snapshot::layout_fingerprint(snapshot);
@@ -309,6 +326,20 @@ fn restore_with_imports_and_failures(
     let mut workspaces = Vec::new();
     let mut terminals = HashMap::new();
     let mut terminal_runtimes = HashMap::new();
+    let mut pane_ids = HashMap::new();
+    let mut saved_pane_ids = HashSet::new();
+    let mut ambiguous_pane_ids = HashSet::new();
+    for workspace in &snapshot.workspaces {
+        for tab in &workspace.tabs {
+            let mut raw_ids = Vec::new();
+            collect_layout_snapshot_pane_ids(&tab.layout, &mut raw_ids);
+            for raw in raw_ids {
+                if !tab.panes.contains_key(&raw) || !saved_pane_ids.insert(raw) {
+                    ambiguous_pane_ids.insert(raw);
+                }
+            }
+        }
+    }
     let mut resumed_agent_sessions = HashSet::new();
     #[cfg(unix)]
     let mut terminal_ids = imported_panes
@@ -338,7 +369,16 @@ fn restore_with_imports_and_failures(
             imported_panes,
         );
         failed_imports += workspace_failed_imports;
-        if let Some((workspace, restored_terminals, restored_runtimes)) = restored {
+        if let Some((workspace, restored_terminals, restored_runtimes, restored_panes)) = restored {
+            for (raw, pane) in restored_panes {
+                if ambiguous_pane_ids.contains(&raw) {
+                    continue;
+                }
+                if pane_ids.insert(raw, pane).is_some() {
+                    pane_ids.remove(&raw);
+                    ambiguous_pane_ids.insert(raw);
+                }
+            }
             for terminal in restored_terminals {
                 terminals.insert(terminal.id.clone(), terminal);
             }
@@ -347,7 +387,11 @@ fn restore_with_imports_and_failures(
         }
     }
     crate::workspace::reserve_workspace_ids(&workspaces);
-    ((workspaces, terminals, terminal_runtimes), failed_imports)
+    let aliases = snapshot.pane_aliases.rebind(&pane_ids, &mut workspaces);
+    (
+        ((workspaces, terminals, terminal_runtimes), aliases),
+        failed_imports,
+    )
 }
 
 fn restore_workspace(
@@ -362,6 +406,7 @@ fn restore_workspace(
     let mut tabs = Vec::new();
     let mut terminals = Vec::new();
     let mut terminal_runtimes = HashMap::new();
+    let mut restored_panes = Vec::new();
     let workspace_id = snap
         .id
         .clone()
@@ -424,6 +469,9 @@ fn restore_workspace(
         }
         next_public_tab_number = next_public_tab_number.max(tab.number + 1);
         for pane_id in tab.layout.pane_ids() {
+            if let Some(old_raw) = reverse_id_map.get(&pane_id) {
+                restored_panes.push((*old_raw, pane_id));
+            }
             let public_number = public_pane_numbers_by_old_raw
                 .get(
                     &reverse_id_map
@@ -473,7 +521,7 @@ fn restore_workspace(
             #[cfg(test)]
             test_runtimes: HashMap::new(),
         })
-        .map(|workspace| (workspace, terminals, terminal_runtimes)),
+        .map(|workspace| (workspace, terminals, terminal_runtimes, restored_panes)),
         failed_imports,
     )
 }
@@ -1606,6 +1654,7 @@ mod tests {
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
             agent_activity_sequence: None,
+            pane_aliases: super::super::PaneAliasesSnapshot::default(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("workspace".into()),
                 custom_name: None,
@@ -1689,6 +1738,7 @@ mod tests {
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
             agent_activity_sequence: None,
+            pane_aliases: super::super::PaneAliasesSnapshot::default(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("w1".into()),
                 custom_name: None,
@@ -1807,6 +1857,7 @@ mod tests {
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
             agent_activity_sequence: None,
+            pane_aliases: super::super::PaneAliasesSnapshot::default(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("w1".into()),
                 custom_name: None,
@@ -1930,6 +1981,7 @@ mod tests {
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
             agent_activity_sequence: None,
+            pane_aliases: super::super::PaneAliasesSnapshot::default(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("workspace".into()),
                 custom_name: None,
@@ -2462,6 +2514,7 @@ mod tests {
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
             agent_activity_sequence: None,
+            pane_aliases: super::super::PaneAliasesSnapshot::default(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("workspace".into()),
                 custom_name: None,

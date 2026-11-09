@@ -116,6 +116,8 @@ pub(crate) struct Journal {
     #[serde(skip)]
     pub live_terminals: std::collections::HashSet<String>,
     #[serde(skip)]
+    pub live_pane_aliases: BTreeMap<String, String>,
+    #[serde(skip)]
     updates_suspended: bool,
 }
 
@@ -238,6 +240,32 @@ impl TransferRegistry {
             })
             .collect();
         journal.live_terminals = state.terminals.keys().map(ToString::to_string).collect();
+        let pane_workspaces: std::collections::HashMap<_, _> = state
+            .workspaces
+            .iter()
+            .flat_map(|workspace| {
+                workspace
+                    .tabs
+                    .iter()
+                    .flat_map(move |tab| tab.panes.keys().map(move |pane| (*pane, &workspace.id)))
+            })
+            .collect();
+        journal.live_pane_aliases = state
+            .public_pane_id_aliases
+            .iter()
+            .map(|(alias, pane)| (alias.clone(), pane))
+            .chain(
+                state
+                    .pane_id_aliases
+                    .iter()
+                    .map(|(alias, pane)| (format!("p_{alias}"), pane)),
+            )
+            .filter_map(|(alias, pane)| {
+                pane_workspaces
+                    .get(pane)
+                    .map(|workspace| (alias, (*workspace).clone()))
+            })
+            .collect();
         Ok(())
     }
 
@@ -283,6 +311,7 @@ impl TransferRegistry {
                     serde_json::from_slice(&std::fs::read(path)?).map_err(io::Error::other)?;
                 disk.live_names = std::mem::take(&mut guard.live_names);
                 disk.live_terminals = std::mem::take(&mut guard.live_terminals);
+                disk.live_pane_aliases = std::mem::take(&mut guard.live_pane_aliases);
                 for id in &disk.reserved_workspaces {
                     crate::workspace::reserve_workspace_id(id);
                 }

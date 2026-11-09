@@ -132,7 +132,14 @@ pub(crate) fn capture(
                     right_click_passthrough: pane.right_click_passthrough,
                 },
             );
-            aliases.insert(format!("p_{}", id.raw()), id.raw());
+            if app
+                .state
+                .pane_id_aliases
+                .get(&id.raw())
+                .is_none_or(|target| target == &id)
+            {
+                aliases.insert(format!("p_{}", id.raw()), id.raw());
+            }
             if let Some(plugin) = app.state.plugin_panes.get(&id) {
                 plugin_ids.insert(plugin.plugin_id.clone());
                 plugin_panes.insert(

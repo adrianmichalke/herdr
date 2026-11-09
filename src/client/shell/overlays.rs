@@ -1,7 +1,10 @@
 use super::*;
 
 mod settings_overlay;
+mod tab_move_overlay;
 mod worktree_overlays;
+
+pub(in crate::client::shell) use tab_move_overlay::render_tab_move_overlay;
 
 #[derive(Default)]
 pub(crate) struct OverlayRender {
@@ -17,6 +20,7 @@ pub(crate) struct OverlayRender {
     pub(crate) navigator_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(crate) worktree_search: Rect,
     pub(crate) worktree_rows: Vec<(Rect, usize)>,
+    pub(crate) tab_move_rows: Vec<(Rect, String)>,
     pub(crate) help_popup: Rect,
     pub(crate) help_scrollbar: Rect,
     pub(crate) help_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -62,6 +66,7 @@ pub(crate) fn render_client_overlay(
             render_release_notes_overlay(b, v, &s.update_install_command, p)
         }
         ClientShellOverlay::SessionPicker(v) => render_session_picker_overlay(b, v, p),
+        ClientShellOverlay::TabMove(v) => render_tab_move_overlay(b, v, p),
         ClientShellOverlay::Rename(v) => render_rename_overlay(b, v, p),
         ClientShellOverlay::ConfirmClose(v) => render_confirm_close_overlay(b, v, p),
         ClientShellOverlay::Help(v) => render_help_overlay(b, v, k, p),

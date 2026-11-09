@@ -406,6 +406,7 @@ impl App {
         // Try to restore previous session
         let mut restored_terminals = std::collections::HashMap::new();
         let mut restored_activity_sequence = 0;
+        let mut restored_pane_aliases = crate::persist::RestoredPaneAliases::default();
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         let mut snapshot = policy.restore_session.then(crate::persist::load).flatten();
         if policy.restore_session {
@@ -443,20 +444,22 @@ impl App {
                 .pane_history
                 .then(crate::persist::load_history)
                 .flatten();
-            let (ws, terminals, terminal_runtimes) = crate::persist::restore(
-                &snap,
-                history.as_ref(),
-                24,
-                80,
-                config.advanced.scrollback_limit_bytes,
-                &config.terminal.default_shell,
-                config.terminal.shell_mode,
-                config.session.resume_agents_on_restore,
-                event_tx.clone(),
-                render_notify.clone(),
-                render_dirty.clone(),
-            );
+            let ((ws, terminals, terminal_runtimes), aliases) =
+                crate::persist::restore_with_aliases(
+                    &snap,
+                    history.as_ref(),
+                    24,
+                    80,
+                    config.advanced.scrollback_limit_bytes,
+                    &config.terminal.default_shell,
+                    config.terminal.shell_mode,
+                    config.session.resume_agents_on_restore,
+                    event_tx.clone(),
+                    render_notify.clone(),
+                    render_dirty.clone(),
+                );
             restored_terminals = terminals;
+            restored_pane_aliases = aliases;
             restored_terminal_runtimes = terminal_runtimes.into();
             if ws.is_empty() {
                 crate::logging::session_restored(0, "empty");
@@ -509,8 +512,8 @@ impl App {
         let mut state = AppState {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
-            pane_id_aliases: std::collections::HashMap::new(),
-            public_pane_id_aliases: std::collections::HashMap::new(),
+            pane_id_aliases: restored_pane_aliases.raw,
+            public_pane_id_aliases: restored_pane_aliases.public,
             workspaces,
             workspace_transfer_fences: std::collections::HashSet::new(),
             active,
@@ -595,6 +598,7 @@ impl App {
         };
 
         state.terminals = restored_terminals;
+        state.reserve_pane_alias_namespaces();
 
         // Background auto-update is disabled for non-persistent test apps
         // and in debug/test builds so local development never mutates the
@@ -738,19 +742,19 @@ impl App {
         ) {
             app.plugin_installation_cleanup_allowed = false;
         }
-        let (workspaces, terminals, runtimes) = crate::persist::restore_handoff(
-            snapshot,
-            config.advanced.scrollback_limit_bytes,
-            &config.terminal.default_shell,
-            config.terminal.shell_mode,
-            imports,
-            app.event_tx.clone(),
-            app.render_notify.clone(),
-            app.render_dirty.clone(),
-        )?;
-        let pane_id_aliases = crate::persist::handoff_pane_aliases(snapshot, &workspaces);
-
-        app.state.pane_id_aliases = pane_id_aliases;
+        let ((workspaces, terminals, runtimes), aliases) =
+            crate::persist::restore_handoff_with_aliases(
+                snapshot,
+                config.advanced.scrollback_limit_bytes,
+                &config.terminal.default_shell,
+                config.terminal.shell_mode,
+                imports,
+                app.event_tx.clone(),
+                app.render_notify.clone(),
+                app.render_dirty.clone(),
+            )?;
+        app.state.pane_id_aliases = aliases.raw;
+        app.state.public_pane_id_aliases = aliases.public;
         app.state.workspaces = workspaces;
         app.state.terminals = terminals;
         app.state.next_agent_activity_seq = snapshot.agent_activity_sequence.unwrap_or_default();

@@ -169,6 +169,17 @@ pub(crate) fn resolve_when_ready(
     }
 }
 
+fn local_alias_busy(journal: &super::journal::Journal, id: &str) -> Option<bool> {
+    let workspace = journal.live_pane_aliases.get(id)?;
+    Some(journal.sources.values().any(|source| {
+        source.params.workspace_id == *workspace
+            && matches!(
+                source.phase,
+                SourcePhase::Preparing | SourcePhase::CommitDecided
+            )
+    }))
+}
+
 pub(crate) fn resolve(
     registry: &TransferRegistry,
     request: &Request,
@@ -194,6 +205,9 @@ pub(crate) fn resolve(
     let candidates = targets(request);
     let relevant = registry.read(|journal| {
         candidates.iter().any(|(id, kind)| {
+            if let Some(busy) = local_alias_busy(journal, id) {
+                return busy;
+            }
             journal
                 .routes
                 .values()
@@ -222,6 +236,11 @@ pub(crate) fn resolve(
     let mut ambiguous = false;
     visit_request_targets(&mut value, &mut |target, kind| {
         let Some(id) = target.as_str() else { return };
+        if let Some(alias_busy) = local_alias_busy(&journal, id) {
+            has_local = true;
+            busy |= alias_busy;
+            return;
+        }
         let named_agent = kind == TargetKind::Agent
             && !id.split_once(":p").is_some_and(|(workspace, pane)| {
                 crate::workspace::public_workspace_number(workspace).is_some()
@@ -267,7 +286,7 @@ pub(crate) fn resolve(
         } else {
             None
         };
-        let matches: Vec<_> = journal
+        let mut matches: Vec<_> = journal
             .routes
             .iter()
             .filter(|(route_id, _)| indexed_route.is_none_or(|selected| selected == *route_id))
@@ -275,6 +294,13 @@ pub(crate) fn resolve(
                 translate(route, id, kind).map(|translated| (route_id, route, translated))
             })
             .collect();
+        if !named_agent
+            && matches
+                .iter()
+                .any(|(_, route, _)| route.identities.contains_key(id))
+        {
+            matches.retain(|(_, route, _)| route.identities.contains_key(id));
+        }
         if matches.windows(2).any(|pair| {
             pair[0].1.destination_session != pair[1].1.destination_session || pair[0].2 != pair[1].2
         }) {
@@ -1117,6 +1143,124 @@ mod tests {
         registry
     }
 
+    fn pending_source(
+        workspace_id: &str,
+        phase: SourcePhase,
+    ) -> super::super::journal::SourceRecord {
+        super::super::journal::SourceRecord {
+            params: crate::api::schema::WorkspaceTransferParams {
+                workspace_id: workspace_id.into(),
+                destination_session: "other".into(),
+                transfer_id: "pending".into(),
+            },
+            info: crate::api::schema::WorkspaceTransferInfo {
+                transfer_id: "pending".into(),
+                state: crate::api::schema::WorkspaceTransferState::Pending,
+                destination_session: "other".into(),
+                workspace_id: None,
+                focused_tab_id: None,
+                focused_pane_id: None,
+                error: None,
+            },
+            phase,
+            route: None,
+            source_identities: Default::default(),
+            source_names: Default::default(),
+            runtime_released: false,
+        }
+    }
+
+    #[test]
+    fn retained_tab_aliases_take_precedence_over_exported_workspace_namespaces() {
+        let registry = fixture();
+        let mut state = crate::app::AppState::test_new();
+        state.workspaces = vec![crate::workspace::Workspace::test_new("retained")];
+        state.workspaces[0].id = "w2".into();
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        state.public_pane_id_aliases.insert("w1:p9".into(), pane);
+        state.pane_id_aliases.insert(2, pane);
+        registry.sync_live_bindings(&state).unwrap();
+        for value in [
+            serde_json::json!({"id":"pane", "method":"pane.get", "params":{"pane_id":"w1:p9"}}),
+            serde_json::json!({"id":"raw", "method":"pane.get", "params":{"pane_id":"p_2"}}),
+            serde_json::json!({"id":"agent", "method":"agent.get", "params":{"target":"w1:p9"}}),
+        ] {
+            let request: Request = serde_json::from_value(value.clone()).unwrap();
+            assert!(resolve(&registry, &request, &value.to_string())
+                .unwrap()
+                .is_none());
+        }
+        for phase in [SourcePhase::Preparing, SourcePhase::CommitDecided] {
+            registry
+                .update(|journal| {
+                    journal
+                        .sources
+                        .insert("pending".into(), pending_source("w1", phase));
+                    Ok(())
+                })
+                .unwrap();
+            let value = serde_json::json!({"id":"local", "method":"pane.get", "params":{"pane_id":"w1:p9"}});
+            let request: Request = serde_json::from_value(value.clone()).unwrap();
+            assert!(resolve(&registry, &request, &value.to_string())
+                .unwrap()
+                .is_none());
+            let value = serde_json::json!({"id":"moving", "method":"pane.get", "params":{"pane_id":"w1:p2"}});
+            let request: Request = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(
+                resolve(&registry, &request, &value.to_string())
+                    .err()
+                    .unwrap()
+                    .kind(),
+                io::ErrorKind::WouldBlock
+            );
+        }
+        registry
+            .update(|journal| {
+                journal
+                    .sources
+                    .insert("owner".into(), pending_source("w2", SourcePhase::Preparing));
+                Ok(())
+            })
+            .unwrap();
+        let value = serde_json::json!({"id":"owner-moving", "method":"pane.get", "params":{"pane_id":"w1:p9"}});
+        let request: Request = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            resolve(&registry, &request, &value.to_string())
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn explicit_moved_pane_routes_precede_an_older_workspace_prefix_route() {
+        let registry = fixture();
+        registry
+            .update(|journal| {
+                let mut route = journal.routes["move"].clone();
+                route.transfer_id = "second".into();
+                route.origin_workspace = "w2".into();
+                route.destination_workspace = "w9".into();
+                route.destination_session = "third".into();
+                route.identities =
+                    BTreeMap::from([("w2".into(), "w9".into()), ("w1:p9".into(), "w9:p3".into())]);
+                route.names.clear();
+                route.canonical_inverse.clear();
+                journal.routes.insert("second".into(), route);
+                Ok(())
+            })
+            .unwrap();
+        let value =
+            serde_json::json!({"id":"moved", "method":"pane.get", "params":{"pane_id":"w1:p9"}});
+        let request: Request = serde_json::from_value(value.clone()).unwrap();
+        let forwarded = resolve(&registry, &request, &value.to_string())
+            .unwrap()
+            .unwrap();
+        assert_eq!(forwarded.route.destination_session, "third");
+        assert_eq!(forwarded.request["params"]["pane_id"], "w9:p3");
+    }
+
     #[test]
     fn agent_names_cannot_capture_structural_ids_or_raw_aliases() {
         let registry = fixture();
@@ -1363,6 +1507,70 @@ mod tests {
         assert_eq!(forwarded.request["params"]["message"], "w1:p2");
         assert_eq!(forwarded.request["params"]["resume_argv"][0], "w1:p2");
         assert_eq!(forwarded.request["params"]["agent_session_path"], "w1:p2");
+    }
+
+    #[test]
+    fn tab_transfer_routes_both_endpoints_and_rejects_mixed_sessions() {
+        let registry = fixture();
+        for (tab_id, workspace_id) in [("w1:t3", "w2"), ("w2:t3", "w1")] {
+            let value = serde_json::json!({
+                "id":"move-tab", "method":"tab.move_to_workspace",
+                "params":{"tab_id":tab_id,"workspace_id":workspace_id}
+            });
+            let request: Request = serde_json::from_value(value.clone()).unwrap();
+            let endpoints = targets(&request);
+            assert_eq!(endpoints.len(), 2);
+            assert!(endpoints.iter().any(|(id, _)| id == tab_id));
+            assert!(endpoints.iter().any(|(id, _)| id == workspace_id));
+            assert_eq!(
+                resolve(&registry, &request, &value.to_string())
+                    .err()
+                    .unwrap()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+        registry
+            .update(|journal| {
+                let mut second = journal.routes["move"].clone();
+                second.transfer_id = "second".into();
+                second.origin_workspace = "w2".into();
+                second.destination_workspace = "w8".into();
+                second.destination_session = "third".into();
+                second.identities = BTreeMap::from([("w2".into(), "w8".into())]);
+                second.canonical_inverse = BTreeMap::from([("w8".into(), "w2".into())]);
+                second.names.clear();
+                journal.routes.insert("second".into(), second);
+                Ok(())
+            })
+            .unwrap();
+        let value = serde_json::json!({
+            "id":"move-tab", "method":"tab.move_to_workspace",
+            "params":{"tab_id":"w1:t3","workspace_id":"w2"}
+        });
+        let request: Request = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            resolve(&registry, &request, &value.to_string())
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        registry
+            .update(|journal| {
+                journal
+                    .routes
+                    .get_mut("second")
+                    .unwrap()
+                    .destination_session = "other".into();
+                Ok(())
+            })
+            .unwrap();
+        let forwarded = resolve(&registry, &request, &value.to_string())
+            .unwrap()
+            .unwrap();
+        assert_eq!(forwarded.request["params"]["tab_id"], "w7:t3");
+        assert_eq!(forwarded.request["params"]["workspace_id"], "w8");
     }
 
     #[test]

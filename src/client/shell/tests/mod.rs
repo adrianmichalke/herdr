@@ -264,3 +264,4 @@ mod mouse_selection;
 mod popup_focus_projection;
 mod sessions;
 mod startup_overlays;
+mod tab_move;

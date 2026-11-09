@@ -546,6 +546,7 @@ mod tests {
         crate::persist::SessionSnapshot {
             version: 0,
             agent_activity_sequence: None,
+            pane_aliases: crate::persist::PaneAliasesSnapshot::default(),
             workspaces: Vec::new(),
             active: None,
             selected: 0,

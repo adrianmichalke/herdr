@@ -43,7 +43,7 @@ impl App {
             return Ok(resolved);
         }
 
-        if let Some((ws_idx, pane_id)) = self.parse_current_public_pane_id(target) {
+        if let Some((ws_idx, pane_id)) = self.parse_registered_public_pane_target(target) {
             if let Some(resolved) = self.terminal_target_for_pane(ws_idx, pane_id) {
                 return Ok(resolved);
             }
@@ -75,7 +75,7 @@ impl App {
         &self,
         target: &str,
     ) -> Result<TerminalTarget, TerminalTargetError> {
-        if let Some((ws_idx, pane_id)) = self.parse_current_public_pane_id(target) {
+        if let Some((ws_idx, pane_id)) = self.parse_registered_public_pane_target(target) {
             if let Some(resolved) = self
                 .terminal_target_for_pane(ws_idx, pane_id)
                 .filter(|resolved| self.target_is_agent(resolved))
@@ -101,6 +101,23 @@ impl App {
         Err(TerminalTargetError::NotFound {
             target: target.to_string(),
         })
+    }
+
+    fn parse_registered_public_pane_target(
+        &self,
+        target: &str,
+    ) -> Option<(usize, crate::layout::PaneId)> {
+        if let Some(current) = self.parse_current_public_pane_id(target) {
+            return Some(current);
+        }
+        let (workspace, pane) = target.rsplit_once(":p")?;
+        if crate::workspace::public_workspace_number(workspace)? == 0
+            || crate::workspace::decode_public_number(pane)? == 0
+        {
+            return None;
+        }
+        let pane_id = *self.state.public_pane_id_aliases.get(target)?;
+        self.find_pane(pane_id).map(|(index, _)| (index, pane_id))
     }
 
     fn target_is_agent(&self, target: &TerminalTarget) -> bool {

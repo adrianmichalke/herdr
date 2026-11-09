@@ -12,6 +12,7 @@ impl ClientShellState {
                     | ClientShellOverlay::ContextMenu(_)
                     | ClientShellOverlay::GlobalMenu(_)
                     | ClientShellOverlay::SessionPicker(_)
+                    | ClientShellOverlay::TabMove(_)
             );
         }
         matches!(

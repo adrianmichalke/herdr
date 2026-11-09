@@ -8,6 +8,8 @@ use crate::layout::Node;
 use crate::terminal::{TerminalRuntimeRegistry, TerminalState};
 use crate::workspace::Workspace;
 
+use super::PaneAliasesSnapshot;
+
 /// Current snapshot format version.
 pub(super) const SNAPSHOT_VERSION: u32 = 3;
 
@@ -19,6 +21,8 @@ pub struct SessionSnapshot {
     pub version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_activity_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "PaneAliasesSnapshot::is_empty")]
+    pub pane_aliases: PaneAliasesSnapshot,
     pub workspaces: Vec<WorkspaceSnapshot>,
     pub active: Option<usize>,
     pub selected: usize,
@@ -190,6 +194,8 @@ struct RawSessionSnapshot {
     #[serde(default)]
     agent_activity_sequence: Option<u64>,
     #[serde(default)]
+    pane_aliases: PaneAliasesSnapshot,
+    #[serde(default)]
     workspaces: Vec<serde_json::Value>,
     #[serde(default)]
     active: Option<usize>,
@@ -207,6 +213,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
     Ok(SessionSnapshot {
         version: raw.version,
         agent_activity_sequence: raw.agent_activity_sequence,
+        pane_aliases: raw.pane_aliases,
         workspaces: raw
             .workspaces
             .into_iter()
@@ -281,6 +288,7 @@ pub fn capture(
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
         agent_activity_sequence: Some(agent_activity_sequence),
+        pane_aliases: PaneAliasesSnapshot::default(),
         workspaces: workspaces
             .iter()
             .map(|workspace| capture_workspace(workspace, terminals, terminal_runtimes))
@@ -606,6 +614,50 @@ mod tests {
     }
 
     #[test]
+    fn pane_alias_metadata_is_optional_and_does_not_change_version_three_json() {
+        for name in ["current-herdr", "current-herdr-dev", "legacy-pre-tabs-v2"] {
+            let snapshot = parse_snapshot(session_fixture(name)).unwrap();
+            assert!(snapshot.pane_aliases.is_empty());
+            let json = serde_json::to_value(&snapshot).unwrap();
+            assert!(json.get("pane_aliases").is_none());
+            let direct: SessionSnapshot = serde_json::from_value(json).unwrap();
+            assert!(direct.pane_aliases.is_empty());
+        }
+        assert_eq!(SNAPSHOT_VERSION, 3);
+        let empty: PaneAliasesSnapshot = serde_json::from_str("{}").unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(serde_json::to_value(empty).unwrap(), serde_json::json!({}));
+    }
+
+    #[test]
+    fn persistence_aliases_do_not_extend_the_frozen_endpoint_snapshot() {
+        let snapshot: crate::protocol::ClientShellSnapshot = serde_json::from_str(include_str!(
+            "../../tests/fixtures/endpoint-snapshot-v1.json"
+        ))
+        .unwrap();
+        let json = serde_json::to_value(snapshot).unwrap();
+        assert!(json.get("pane_aliases").is_none());
+    }
+
+    #[test]
+    fn pane_alias_metadata_survives_both_direct_and_migrating_json_loads() {
+        let mut snapshot = capture_from_state(&state_with_workspaces(&["aliases"]));
+        let target = *snapshot.workspaces[0].tabs[0].panes.keys().next().unwrap();
+        snapshot.pane_aliases = PaneAliasesSnapshot {
+            raw: HashMap::from([(90, target)]),
+            public: HashMap::from([("w9:p7".into(), target)]),
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let direct: SessionSnapshot = serde_json::from_str(&json).unwrap();
+        let migrated = parse_snapshot(&json).unwrap();
+        assert_eq!(direct.pane_aliases, snapshot.pane_aliases);
+        assert_eq!(migrated.pane_aliases, snapshot.pane_aliases);
+        assert_eq!(migrated.version, 3);
+        let pure = capture_from_state(&state_with_workspaces(&["pure"]));
+        assert!(pure.pane_aliases.is_empty());
+    }
+
+    #[test]
     fn managed_agent_snapshot_omits_pending_and_persists_active_ownership() {
         let mut state = state_with_workspaces(&["managed-snapshot"]);
         let root = state.workspaces[0].tabs[0].root_pane;
@@ -669,6 +721,7 @@ mod tests {
         let snap = SessionSnapshot {
             version: SNAPSHOT_VERSION,
             agent_activity_sequence: None,
+            pane_aliases: PaneAliasesSnapshot::default(),
             workspaces: vec![],
             active: None,
             selected: 0,
@@ -738,6 +791,7 @@ mod tests {
 
         let snap = SessionSnapshot {
             agent_activity_sequence: None,
+            pane_aliases: PaneAliasesSnapshot::default(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("wproj".to_string()),
                 custom_name: Some("pi-mono".to_string()),
@@ -1521,6 +1575,7 @@ mod tests {
         let snap = SessionSnapshot {
             version: SNAPSHOT_VERSION,
             agent_activity_sequence: None,
+            pane_aliases: PaneAliasesSnapshot::default(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("test-ws".to_string()),
                 custom_name: Some("fallback test".to_string()),

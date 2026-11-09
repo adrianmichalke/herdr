@@ -523,8 +523,13 @@ impl Workspace {
         extra_env: Vec<(String, String)>,
     ) -> std::io::Result<(usize, TerminalState, TerminalRuntime)> {
         let number = self.next_public_tab_number;
-        self.next_public_tab_number += 1;
+        let next_tab_number = number
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("public tab numbers exhausted"))?;
         let pane_number = self.next_public_pane_number;
+        pane_number
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("public pane numbers exhausted"))?;
         let launch_env = self.launch_env_for_new_pane(number, pane_number, extra_env);
         let events = self
             .active_tab()
@@ -570,6 +575,7 @@ impl Workspace {
                 render_dirty,
             )?
         };
+        self.next_public_tab_number = next_tab_number;
         self.register_new_pane_with_number(tab.root_pane, pane_number);
         self.tabs.push(tab);
         Ok((self.tabs.len() - 1, terminal, runtime))
@@ -893,6 +899,64 @@ impl Workspace {
             self.unregister_pane(removed);
         }
         false
+    }
+
+    pub(crate) fn tab_transfer_numbers(
+        &self,
+        pane_count: usize,
+    ) -> Option<(usize, std::ops::Range<usize>)> {
+        if pane_count == 0
+            || self.next_public_tab_number == 0
+            || self.next_public_pane_number == 0
+            || self
+                .tabs
+                .iter()
+                .any(|tab| tab.number >= self.next_public_tab_number)
+            || self
+                .public_pane_numbers
+                .values()
+                .any(|number| *number >= self.next_public_pane_number)
+        {
+            return None;
+        }
+        self.next_public_tab_number.checked_add(1)?;
+        let pane_end = self.next_public_pane_number.checked_add(pane_count)?;
+        Some((
+            self.next_public_tab_number,
+            self.next_public_pane_number..pane_end,
+        ))
+    }
+
+    pub(crate) fn move_tab_to_workspace(
+        &mut self,
+        tab_idx: usize,
+        destination: &mut Self,
+    ) -> Option<usize> {
+        if self.id == destination.id || self.tabs.len() <= 1 {
+            return None;
+        }
+        let tab = self.tabs.get(tab_idx)?;
+        let pane_ids = tab.layout.pane_ids();
+        if pane_ids.len() != tab.panes.len()
+            || pane_ids.iter().any(|pane| {
+                !tab.panes.contains_key(pane)
+                    || !self.public_pane_numbers.contains_key(pane)
+                    || destination.public_pane_numbers.contains_key(pane)
+            })
+        {
+            return None;
+        }
+        let (tab_number, pane_numbers) = destination.tab_transfer_numbers(pane_ids.len())?;
+        let mut tab = self.tabs.remove(tab_idx);
+        self.adjust_active_tab_after_removal(tab_idx);
+        tab.number = tab_number;
+        destination.next_public_tab_number = tab_number + 1;
+        for (pane_id, number) in pane_ids.into_iter().zip(pane_numbers) {
+            self.unregister_moved_pane(pane_id);
+            destination.register_new_pane_with_number(pane_id, number);
+        }
+        destination.tabs.push(tab);
+        Some(destination.tabs.len() - 1)
     }
 
     pub(crate) fn take_pane_for_move(&mut self, pane_id: PaneId) -> Option<TakenPane> {
