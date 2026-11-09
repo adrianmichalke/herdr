@@ -4523,6 +4523,36 @@
           ],
           "type": "object"
         },
+        "WorkspaceTransferParams": {
+          "properties": {
+            "destination_session": {
+              "type": "string"
+            },
+            "transfer_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "destination_session",
+            "transfer_id"
+          ],
+          "type": "object"
+        },
+        "WorkspaceTransferStatusParams": {
+          "properties": {
+            "transfer_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "transfer_id"
+          ],
+          "type": "object"
+        },
         "WorkspaceWorktreeInfo": {
           "properties": {
             "checkout_path": {
@@ -4913,6 +4943,38 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workspace.transfer",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkspaceTransferParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workspace.transfer.status",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkspaceTransferStatusParams"
             }
           },
           "required": [
@@ -9265,6 +9327,22 @@
             },
             {
               "properties": {
+                "transfer": {
+                  "$ref": "#/schemas/success_response/$defs/WorkspaceTransferInfo"
+                },
+                "type": {
+                  "const": "workspace_transfer",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "transfer"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "root_pane": {
                   "$ref": "#/schemas/success_response/$defs/PaneInfo"
                 },
@@ -10668,6 +10746,57 @@
             "agent_status"
           ],
           "type": "object"
+        },
+        "WorkspaceTransferInfo": {
+          "properties": {
+            "destination_session": {
+              "type": "string"
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "focused_pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "focused_tab_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "$ref": "#/schemas/success_response/$defs/WorkspaceTransferState"
+            },
+            "transfer_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "transfer_id",
+            "state",
+            "destination_session"
+          ],
+          "type": "object"
+        },
+        "WorkspaceTransferState": {
+          "enum": [
+            "pending",
+            "committed",
+            "failed"
+          ],
+          "type": "string"
         },
         "WorkspaceWorktreeInfo": {
           "properties": {

@@ -7,6 +7,137 @@ use crate::client::endpoint::{
     EndpointTransport, ProfileId, SavedSshEndpoint,
 };
 
+#[tokio::test]
+async fn workspace_transfer_status_is_readable_on_an_inactive_surface_without_taking_focus() {
+    let mut server = test_headless_server();
+    let _input = install_focused_test_runtime(&mut server, b"");
+    let (writer, control_rx, _render_rx) = test_client_writer();
+    let client_id = 53;
+    server.handle_server_event(ServerEvent::ClientShellConnected {
+        surface_reuse: false,
+        surface_delta: false,
+        surface_scroll: false,
+        client_id,
+        surface_cols: 101,
+        surface_rows: 37,
+        cell_width_px: 9,
+        cell_height_px: 18,
+        pixel_mouse: true,
+        direct_graphics: false,
+        endpoint_keybindings: true,
+        mouse_capture: true,
+        surface_active: false,
+        writer,
+    });
+    let _ = client_shell_snapshot(&control_rx);
+    let original_size = server.effective_size;
+    let original_focus = server.app.session_snapshot().focused_pane_id;
+    server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+        client_id,
+        boot_id: server.client_shell_boot_id.clone(),
+        request: Box::new(api::schema::Request {
+            id: "inactive-transfer-status".into(),
+            method: api::schema::Method::WorkspaceTransferStatus(
+                api::schema::WorkspaceTransferStatusParams {
+                    transfer_id: "22000000-0000-4000-8000-000000000053".into(),
+                },
+            ),
+        }),
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        server.drain_server_events();
+        if let Ok(bytes) = control_rx.try_recv() {
+            if let ServerMessage::ClientShellEndpointResponseChunk { data, .. } =
+                read_server_message(bytes)
+            {
+                let error: api::schema::ErrorResponse = serde_json::from_slice(&data).unwrap();
+                assert_eq!(error.error.code, "not_found");
+                break;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "inactive status was never answered"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(server.foreground_client_id, None);
+    assert_eq!(server.effective_size, original_size);
+    assert_eq!(
+        server.app.session_snapshot().focused_pane_id,
+        original_focus
+    );
+    assert!(!server.clients[&client_id].shell_surface_active);
+}
+
+#[tokio::test]
+async fn workspace_transfer_fence_rejects_shell_navigation_before_focus_changes() {
+    let mut server = test_headless_server();
+    server.app.state = crate::app::AppState::test_with_adversarial_identity_state();
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.workspaces[0].active_tab = 0;
+    let target = server.app.public_tab_id(0, 1).unwrap();
+    let (writer, control_rx, _render_rx) = test_client_writer();
+    let client_id = 54;
+    server.handle_server_event(ServerEvent::ClientShellConnected {
+        surface_reuse: false,
+        surface_delta: false,
+        surface_scroll: false,
+        client_id,
+        surface_cols: 101,
+        surface_rows: 37,
+        cell_width_px: 9,
+        cell_height_px: 18,
+        pixel_mouse: true,
+        direct_graphics: false,
+        endpoint_keybindings: true,
+        mouse_capture: true,
+        surface_active: true,
+        writer,
+    });
+    let _ = client_shell_snapshot(&control_rx);
+    let workspace = server.app.state.workspaces[0].id.clone();
+    server.app.state.workspace_transfer_fences.insert(workspace);
+    server.foreground_client_id = None;
+    let location = server.clients[&client_id].shell_location.clone();
+    let active = server.app.state.active;
+    let active_tab = server.app.state.workspaces[0].active_tab;
+    let seen: Vec<_> = server.app.state.workspaces[0]
+        .tabs
+        .iter()
+        .flat_map(|tab| tab.panes.values().map(|pane| pane.seen))
+        .collect();
+    server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+        client_id,
+        boot_id: server.client_shell_boot_id.clone(),
+        request: Box::new(api::schema::Request {
+            id: "fenced-tab-focus".into(),
+            method: api::schema::Method::TabFocus(api::schema::TabTarget { tab_id: target }),
+        }),
+    });
+    let ServerMessage::ClientShellEndpointResponseChunk { data, .. } =
+        read_server_message(control_rx.recv().unwrap())
+    else {
+        panic!("expected endpoint error response");
+    };
+    let error: api::schema::ErrorResponse = serde_json::from_slice(&data).unwrap();
+    assert_eq!(error.error.code, "workspace_busy");
+    assert_eq!(server.foreground_client_id, None);
+    assert_eq!(server.app.state.active, active);
+    assert_eq!(server.app.state.workspaces[0].active_tab, active_tab);
+    assert_eq!(server.clients[&client_id].shell_location, location);
+    assert_eq!(
+        server.app.state.workspaces[0]
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.values().map(|pane| pane.seen))
+            .collect::<Vec<_>>(),
+        seen
+    );
+}
+
 #[derive(Clone)]
 struct CapturingEndpointTransport(Arc<Mutex<Vec<crate::protocol::ClientMessage>>>);
 

@@ -62,6 +62,10 @@ impl App {
     }
 
     pub(crate) fn start_background_session_save(&mut self) {
+        if self.workspace_transfer_checkpoint_pending {
+            self.session_save_deadline = Some(Instant::now() + Duration::from_millis(250));
+            return;
+        }
         if !self.policy.persist_session {
             self.session_save_deadline = None;
             return;
@@ -95,6 +99,9 @@ impl App {
     }
 
     pub(crate) fn save_session_now(&mut self) {
+        if self.workspace_transfer_checkpoint_pending {
+            return;
+        }
         if let Some(thread) = self.session_save_thread.take() {
             let _ = thread.join();
         }

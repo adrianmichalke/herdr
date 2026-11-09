@@ -116,6 +116,7 @@ impl EndpointCommands {
                 request,
             };
             if endpoints.send_to(endpoint_id, &message) != EndpointSendOutcome::Sent {
+                lane.retire((queued.generation, queued.boot_id, request_id.clone()));
                 cancelled.push(request_id);
                 continue;
             }
@@ -129,6 +130,69 @@ impl EndpointCommands {
             break;
         }
         cancelled
+    }
+
+    pub(super) fn cancel_queued_request(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        boot_id: &str,
+        request_id: &str,
+    ) -> bool {
+        let Some(lane) = self.lanes.get_mut(endpoint_id) else {
+            return false;
+        };
+        let Some(index) = lane.queued.iter().position(|command| {
+            command.generation == generation
+                && command.boot_id == boot_id
+                && command.request.id == request_id
+        }) else {
+            return false;
+        };
+        lane.queued.remove(index).is_some()
+    }
+
+    pub(super) fn request_may_have_been_sent(
+        &self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        boot_id: &str,
+        request_id: &str,
+    ) -> bool {
+        self.lanes.get(endpoint_id).is_some_and(|lane| {
+            lane.in_flight.as_ref().is_some_and(|command| {
+                command.generation == generation
+                    && command.boot_id == boot_id
+                    && command.request_id == request_id
+            }) || lane
+                .retired
+                .iter()
+                .any(|(sent_generation, sent_boot_id, sent_request_id)| {
+                    *sent_generation == generation
+                        && sent_boot_id == boot_id
+                        && sent_request_id == request_id
+                })
+        })
+    }
+
+    pub(super) fn contains_request(
+        &self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        boot_id: &str,
+        request_id: &str,
+    ) -> bool {
+        self.lanes.get(endpoint_id).is_some_and(|lane| {
+            lane.in_flight.as_ref().is_some_and(|command| {
+                command.generation == generation
+                    && command.boot_id == boot_id
+                    && command.request_id == request_id
+            }) || lane.queued.iter().any(|command| {
+                command.generation == generation
+                    && command.boot_id == boot_id
+                    && command.request.id == request_id
+            })
+        })
     }
 
     pub(super) fn accepts_response(

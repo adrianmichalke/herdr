@@ -2,7 +2,25 @@ use super::*;
 use crossterm::event::{KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 #[derive(Debug, Clone)]
+pub(super) enum SessionPickerPurpose {
+    Switch,
+    WorkspaceTransfer {
+        source: Box<WorkspaceTransferSource>,
+        phase: WorkspaceTransferPhase,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WorkspaceTransferPhase {
+    Selecting,
+    Moving,
+    Following,
+    Finished,
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct SessionPickerOverlay {
+    pub(super) purpose: SessionPickerPurpose,
     pub(super) machine: ClientEndpointId,
     pub(super) machine_label: String,
     pub(super) current: String,
@@ -17,6 +35,24 @@ pub(super) struct SessionPickerOverlay {
 }
 
 impl SessionPickerOverlay {
+    pub(super) fn is_transfer(&self) -> bool {
+        matches!(self.purpose, SessionPickerPurpose::WorkspaceTransfer { .. })
+    }
+
+    pub(super) fn noncancellable(&self) -> bool {
+        self.is_transfer() && self.switching
+    }
+
+    pub(super) fn finished(&self) -> bool {
+        matches!(
+            self.purpose,
+            SessionPickerPurpose::WorkspaceTransfer {
+                phase: WorkspaceTransferPhase::Finished,
+                ..
+            }
+        )
+    }
+
     pub(super) fn name_error(&self) -> Option<String> {
         let name = self.new_name.as_ref()?.as_str();
         if let Err(error) = crate::session::validate_name(name) {
@@ -158,6 +194,45 @@ impl ClientShellState {
         machine: &ClientEndpointId,
         outcome: &mut ClientShellInput,
     ) {
+        self.open_session_picker_for_machine(machine, SessionPickerPurpose::Switch, outcome);
+    }
+
+    pub(crate) fn open_workspace_transfer_picker(
+        &mut self,
+        source: WorkspaceTransferSource,
+        outcome: &mut ClientShellInput,
+    ) {
+        if self
+            .workspace_transfer_source(&source.workspace_id)
+            .as_ref()
+            != Some(&source)
+        {
+            outcome.repaint |= self.receive_endpoint_unavailable(
+                "This workspace or server changed; reopen Move to session".into(),
+            );
+            return;
+        }
+        let machine = source.endpoint_id.machine_id();
+        self.open_session_picker_for_machine(
+            &machine,
+            SessionPickerPurpose::WorkspaceTransfer {
+                source: Box::new(source),
+                phase: WorkspaceTransferPhase::Selecting,
+            },
+            outcome,
+        );
+    }
+
+    fn open_session_picker_for_machine(
+        &mut self,
+        machine: &ClientEndpointId,
+        purpose: SessionPickerPurpose,
+        outcome: &mut ClientShellInput,
+    ) {
+        if matches!(self.overlay.as_ref(), Some(ClientShellOverlay::SessionPicker(picker)) if picker.noncancellable())
+        {
+            return;
+        }
         let Some(endpoint) = self.visible_endpoint_for_machine(machine) else {
             return;
         };
@@ -171,6 +246,7 @@ impl ClientShellState {
         }
         let request_id = self.next_session_picker_request();
         self.overlay = Some(ClientShellOverlay::SessionPicker(SessionPickerOverlay {
+            purpose,
             machine: machine.clone(),
             machine_label,
             current,
@@ -214,6 +290,9 @@ impl ClientShellState {
         picker.loading = false;
         match result {
             Ok(mut entries) => {
+                if picker.is_transfer() {
+                    entries.retain(|entry| entry.name != picker.current);
+                }
                 entries.sort_by(|left, right| {
                     right
                         .default
@@ -252,7 +331,18 @@ impl ClientShellState {
             Ok(()) => self.overlay = None,
             Err(error) => {
                 picker.switching = false;
-                picker.error = Some(error);
+                picker.error = Some(match &mut picker.purpose {
+                    SessionPickerPurpose::WorkspaceTransfer { phase, .. } => {
+                        if *phase == WorkspaceTransferPhase::Following {
+                            *phase = WorkspaceTransferPhase::Finished;
+                            format!("Workspace moved, but could not open its session: {error}")
+                        } else {
+                            *phase = WorkspaceTransferPhase::Selecting;
+                            error
+                        }
+                    }
+                    SessionPickerPurpose::Switch => error,
+                });
             }
         }
         true
@@ -262,7 +352,12 @@ impl ClientShellState {
         let Some(ClientShellOverlay::SessionPicker(picker)) = self.overlay.as_mut() else {
             return;
         };
-        if !picker.switching && picker.new_name.take().is_some() {
+        if picker.noncancellable() {
+            return;
+        }
+        if picker.finished() {
+            self.overlay = None;
+        } else if !picker.switching && picker.new_name.take().is_some() {
             picker.error = None;
         } else {
             outcome.actions.push(ClientShellAction::SessionCancel {
@@ -277,7 +372,7 @@ impl ClientShellState {
         let Some(ClientShellOverlay::SessionPicker(picker)) = self.overlay.as_ref() else {
             return;
         };
-        if picker.switching || picker.loading || picker.new_name.is_some() {
+        if picker.switching || picker.loading || picker.new_name.is_some() || picker.finished() {
             return;
         }
         let request_id = self.next_session_picker_request();
@@ -299,7 +394,7 @@ impl ClientShellState {
         let Some(ClientShellOverlay::SessionPicker(picker)) = self.overlay.as_mut() else {
             return;
         };
-        if picker.loaded && !picker.loading && !picker.switching {
+        if picker.loaded && !picker.loading && !picker.switching && !picker.finished() {
             picker.new_name = Some(TextEditor::default());
             picker.error = None;
             self.hits.worktree_rows.clear();
@@ -311,6 +406,18 @@ impl ClientShellState {
     }
 
     fn accept_session_picker(&mut self, outcome: &mut ClientShellInput) {
+        let source_changed = match self.overlay.as_ref() {
+            Some(ClientShellOverlay::SessionPicker(SessionPickerOverlay {
+                purpose: SessionPickerPurpose::WorkspaceTransfer { source, .. },
+                switching: false,
+                ..
+            })) => {
+                self.workspace_transfer_source(&source.workspace_id)
+                    .as_ref()
+                    != Some(source.as_ref())
+            }
+            _ => false,
+        };
         let current_is_active = match self.overlay.as_ref() {
             Some(ClientShellOverlay::SessionPicker(picker)) => self
                 .visible_endpoint_for_machine(&picker.machine)
@@ -323,7 +430,13 @@ impl ClientShellState {
         let Some(ClientShellOverlay::SessionPicker(picker)) = self.overlay.as_mut() else {
             return;
         };
-        if picker.loading || picker.switching {
+        if picker.loading || picker.switching || picker.finished() {
+            return;
+        }
+        if source_changed {
+            picker.error =
+                Some("This workspace or server changed; close and reopen Move to session".into());
+            outcome.repaint = true;
             return;
         }
         if !picker.loaded {
@@ -339,7 +452,8 @@ impl ClientShellState {
             }
             input.as_str().to_owned()
         } else if let Some(entry) = picker.entries.get(picker.selected) {
-            if entry.name == picker.current
+            if !picker.is_transfer()
+                && entry.name == picker.current
                 && entry.running
                 && entry.connection_error.is_none()
                 && current_is_active
@@ -359,12 +473,22 @@ impl ClientShellState {
         picker.request_id = request_id;
         picker.switching = true;
         picker.error = None;
-        outcome.actions.push(ClientShellAction::SessionOpen {
-            machine: picker.machine.clone(),
-            request_id,
-            session,
-            create,
-        });
+        match &mut picker.purpose {
+            SessionPickerPurpose::Switch => outcome.actions.push(ClientShellAction::SessionOpen {
+                machine: picker.machine.clone(),
+                request_id,
+                session,
+                create,
+            }),
+            SessionPickerPurpose::WorkspaceTransfer { source, phase } => {
+                *phase = WorkspaceTransferPhase::Moving;
+                outcome.actions.push(ClientShellAction::WorkspaceTransfer {
+                    source: source.as_ref().clone(),
+                    request_id,
+                    destination_session: session,
+                });
+            }
+        }
         outcome.repaint = true;
     }
 
@@ -372,7 +496,12 @@ impl ClientShellState {
         let Some(ClientShellOverlay::SessionPicker(picker)) = self.overlay.as_mut() else {
             return;
         };
-        if picker.loaded && !picker.loading && !picker.switching && picker.new_name.is_none() {
+        if picker.loaded
+            && !picker.loading
+            && !picker.switching
+            && picker.new_name.is_none()
+            && !picker.finished()
+        {
             picker.selected = picker
                 .selected
                 .saturating_add_signed(delta)
@@ -385,7 +514,7 @@ impl ClientShellState {
         let Some(ClientShellOverlay::SessionPicker(picker)) = self.overlay.as_mut() else {
             return false;
         };
-        if !picker.switching {
+        if !picker.switching && !picker.finished() {
             if let Some(input) = picker.new_name.as_mut() {
                 input.insert(text);
                 picker.error = None;
@@ -409,7 +538,7 @@ impl ClientShellState {
             self.cancel_session_picker(outcome);
             return true;
         }
-        if picker.switching {
+        if picker.switching || picker.finished() {
             return true;
         }
         if key.code == KeyCode::Enter {

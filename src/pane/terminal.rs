@@ -229,6 +229,64 @@ impl PaneTerminal {
         Self { ghostty }
     }
 
+    #[cfg(unix)]
+    pub(super) fn workspace_transfer_snapshot(
+        &self,
+        pane_id: u32,
+        child_pid: u32,
+    ) -> std::io::Result<crate::handoff_runtime::HandoffRuntimeState> {
+        let core = self
+            .ghostty
+            .core
+            .lock()
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        let terminal = &core.terminal;
+        let snapshot_error = |err: crate::ghostty::Error| std::io::Error::other(err.to_string());
+        let rows = terminal.rows().map_err(snapshot_error)?;
+        let cols = terminal.cols().map_err(snapshot_error)?;
+        let (cell_width_px, cell_height_px) = terminal.snapshot_cell_size();
+        Ok(crate::handoff_runtime::HandoffRuntimeState {
+            pane_id,
+            terminal_id: None,
+            child_pid,
+            rows,
+            cols,
+            cell_width_px,
+            cell_height_px,
+            keyboard_protocol_flags: u16::from(
+                terminal.kitty_keyboard_flags().map_err(snapshot_error)?,
+            ),
+            keyboard_protocol_ansi: core.kitty_keyboard.replay_ansi(),
+            input_state: None,
+            terminal_title: core.agent_osc_state.terminal_title().map(str::to_string),
+            initial_history_ansi: None,
+            terminal_snapshot: Some(terminal.encode_snapshot().map_err(snapshot_error)?),
+            terminal_snapshot_metadata: Some(crate::handoff_runtime::TerminalSnapshotMetadata {
+                kitty_graphics_enabled: terminal
+                    .kitty_graphics_enabled()
+                    .map_err(snapshot_error)?,
+                legacy_query: Some(
+                    core.c1_xtgettcap_tracker
+                        .workspace_transfer_state()
+                        .map_err(std::io::Error::other)?,
+                ),
+                cursor_shape_overridden: core.decscusr_tracker.cursor_shape_overridden(),
+                child_default_foreground_changed: core.child_default_foreground_changed,
+                child_default_background_changed: core.child_default_background_changed,
+                initial_default_foreground: core
+                    .initial_default_foreground
+                    .map(|color| [color.r, color.g, color.b]),
+                initial_default_background: core
+                    .initial_default_background
+                    .map(|color| [color.r, color.g, color.b]),
+                transient_default_color_owner_pgid: core.transient_default_color_owner_pgid,
+                agent_osc_title: core.agent_osc_state.latest_title().to_owned(),
+                agent_osc_progress: core.agent_osc_state.latest_progress().to_owned(),
+            }),
+            agent_state: None,
+        })
+    }
+
     pub fn process_pty_bytes(
         &self,
         pane_id: PaneId,
@@ -1208,6 +1266,49 @@ impl GhosttyPaneTerminal {
             key_encoder: Mutex::new(key_encoder),
             pending_pty_responses,
         })
+    }
+
+    #[cfg(unix)]
+    pub(super) fn seed_workspace_transfer_metadata(
+        &self,
+        metadata: Option<crate::handoff_runtime::TerminalSnapshotMetadata>,
+        title: Option<String>,
+        keyboard_ansi: Option<&str>,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+    ) -> std::io::Result<()> {
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        core.host_terminal_theme = host_terminal_theme;
+        if let Some(ansi) = keyboard_ansi {
+            core.kitty_keyboard.observe(ansi.as_bytes());
+        }
+        if let Some(metadata) = metadata {
+            if let Some(query) = metadata.legacy_query {
+                core.c1_xtgettcap_tracker
+                    .restore_workspace_transfer_state(query)
+                    .map_err(std::io::Error::other)?;
+            }
+            if metadata.cursor_shape_overridden {
+                core.decscusr_tracker.observe(b"\x1b[1 q");
+            }
+            core.child_default_foreground_changed = metadata.child_default_foreground_changed;
+            core.child_default_background_changed = metadata.child_default_background_changed;
+            let color = |[r, g, b]: [u8; 3]| crate::ghostty::RgbColor { r, g, b };
+            core.initial_default_foreground = metadata.initial_default_foreground.map(color);
+            core.initial_default_background = metadata.initial_default_background.map(color);
+            core.transient_default_color_owner_pgid = metadata.transient_default_color_owner_pgid;
+            core.agent_osc_state.observe(
+                format!(
+                    "\x1b]2;{}\x07\x1b]9;{}\x07",
+                    metadata.agent_osc_title, metadata.agent_osc_progress
+                )
+                .as_bytes(),
+            );
+        }
+        core.agent_osc_state.seed_terminal_title(title);
+        Ok(())
     }
 
     pub(super) fn set_windows_powershell_prompt_cwd_reporting(&self, enabled: bool) {

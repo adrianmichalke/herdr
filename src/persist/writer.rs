@@ -58,6 +58,65 @@ impl SessionWriter {
         crate::logging::session_saved(&self.path, snapshot.workspaces.len());
     }
 
+    #[cfg(unix)]
+    pub(crate) fn capture_transfer_checkpoint_history(
+        snapshot: &SessionSnapshot,
+        workspaces: &[crate::workspace::Workspace],
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        incoming: &crate::workspace::Workspace,
+        incoming_runtimes: &std::collections::HashMap<
+            crate::terminal::TerminalId,
+            crate::terminal::TerminalRuntime,
+        >,
+    ) -> SessionHistorySnapshot {
+        let mut history = super::capture_history(snapshot, workspaces, terminal_runtimes);
+        history
+            .workspaces
+            .push(super::snapshot::WorkspaceHistorySnapshot {
+                tabs: incoming
+                    .tabs
+                    .iter()
+                    .map(|tab| super::snapshot::TabHistorySnapshot {
+                        panes: tab
+                            .panes
+                            .iter()
+                            .filter_map(|(id, pane)| {
+                                let ansi = incoming_runtimes
+                                    .get(&pane.attached_terminal_id)?
+                                    .snapshot_history()?;
+                                Some((
+                                    id.raw(),
+                                    super::snapshot::PaneHistorySnapshot {
+                                        lines: ansi.lines().count(),
+                                        ansi,
+                                    },
+                                ))
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            });
+        history
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn save_transfer_checkpoint(
+        &mut self,
+        snapshot: &SessionSnapshot,
+        history: Option<&SessionHistorySnapshot>,
+    ) -> io::Result<()> {
+        self.preserve_unloaded()?;
+        self.preserve_snapshot_history();
+        super::io::save_to_path(&self.path, snapshot)?;
+        self.protect_unloaded = false;
+        if let Some(history) = history {
+            let history_path = self.path.with_file_name("session-history.json");
+            super::io::save_history_to_path(&history_path, Some(history))?;
+        }
+        crate::logging::session_saved(&self.path, snapshot.workspaces.len());
+        Ok(())
+    }
+
     pub(crate) fn clear(&mut self) {
         let result = self.preserve_unloaded().and_then(|()| {
             self.preserve_snapshot_history();
@@ -313,6 +372,175 @@ mod tests {
 
     fn snapshots(writer: &SessionWriter) -> Vec<(u128, PathBuf)> {
         recovery_files(&writer.path.with_file_name("session-snapshots")).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn transfer_checkpoint_history_matches_normal_capture_for_all_workspaces_and_tabs() {
+        use crate::terminal::{TerminalRuntime, TerminalRuntimeRegistry};
+
+        let mut state = crate::app::AppState::test_with_adversarial_identity_state();
+        state
+            .workspaces
+            .push(crate::workspace::Workspace::test_adversarial_identity_state());
+        state.ensure_test_terminals();
+        state.assert_invariants_for_test();
+        let incoming = &state.workspaces[1];
+        let missing = incoming.tabs[0].root_pane;
+        let empty = incoming.tabs[1].root_pane;
+        let mut resident_runtimes = TerminalRuntimeRegistry::new();
+        let mut incoming_runtimes = std::collections::HashMap::new();
+        for (index, workspace) in state.workspaces.iter().enumerate() {
+            for tab in &workspace.tabs {
+                for (id, pane) in &tab.panes {
+                    if index == 1 && *id == missing {
+                        continue;
+                    }
+                    let ansi = if index == 1 && *id == empty {
+                        String::new()
+                    } else {
+                        format!(
+                            "\x1b[31mworkspace-{index}-pane-{}\x1b[0m\r\nsecond-line\r\n",
+                            id.raw()
+                        )
+                    };
+                    let runtime =
+                        TerminalRuntime::test_with_scrollback_bytes(80, 3, 4096, ansi.as_bytes());
+                    if index == 0 {
+                        resident_runtimes.insert(pane.attached_terminal_id.clone(), runtime);
+                    } else {
+                        incoming_runtimes.insert(pane.attached_terminal_id.clone(), runtime);
+                    }
+                }
+            }
+        }
+        let mut snapshot = super::super::capture(
+            &state.workspaces,
+            &state.terminals,
+            &resident_runtimes,
+            Some(1),
+            1,
+            75,
+        );
+        snapshot.workspaces[1].tabs[0]
+            .panes
+            .get_mut(&missing.raw())
+            .unwrap()
+            .cwd = "/checkpoint-cwd".into();
+        let history = SessionWriter::capture_transfer_checkpoint_history(
+            &snapshot,
+            &state.workspaces[..1],
+            &resident_runtimes,
+            incoming,
+            &incoming_runtimes,
+        );
+        for (id, runtime) in incoming_runtimes {
+            resident_runtimes.insert(id, runtime);
+        }
+        let expected =
+            super::super::capture_history(&snapshot, &state.workspaces, &resident_runtimes);
+        assert_eq!(
+            serde_json::to_value(&history).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        assert!(history.layout_fingerprint.is_some());
+        assert_eq!(history.workspaces.len(), 2);
+        assert_eq!(history.workspaces[1].tabs.len(), incoming.tabs.len());
+        assert!(!history.workspaces[1].tabs[0]
+            .panes
+            .contains_key(&missing.raw()));
+        for (index, workspace) in history.workspaces.iter().enumerate() {
+            assert!(workspace.tabs.iter().any(|tab| tab
+                .panes
+                .values()
+                .any(|pane| { pane.ansi.contains(&format!("workspace-{index}-pane-")) })));
+            for pane in workspace.tabs.iter().flat_map(|tab| tab.panes.values()) {
+                assert_eq!(pane.lines, pane.ansi.lines().count());
+            }
+        }
+        state.assert_invariants_for_test();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transfer_checkpoint_without_history_preserves_existing_sidecar() {
+        let mut writer = writer(false);
+        let history_path = writer.path.with_file_name("session-history.json");
+        std::fs::write(&history_path, b"previous history").unwrap();
+        let snapshot = snapshot();
+        writer.save_transfer_checkpoint(&snapshot, None).unwrap();
+        assert_eq!(std::fs::read(history_path).unwrap(), b"previous history");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&writer.path).unwrap())
+                .unwrap(),
+            serde_json::to_value(snapshot).unwrap()
+        );
+        std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transfer_checkpoint_layout_failure_preserves_layout_and_history() {
+        let mut writer = writer(false);
+        let original = snapshot();
+        super::super::io::save_to_path(&writer.path, &original).unwrap();
+        let before = std::fs::read(&writer.path).unwrap();
+        let history_path = writer.path.with_file_name("session-history.json");
+        std::fs::write(&history_path, b"previous history").unwrap();
+        std::fs::create_dir(writer.path.with_extension("json.tmp")).unwrap();
+        let mut changed = snapshot();
+        changed.workspaces[0].custom_name = Some("incoming checkpoint".into());
+        let history = super::super::capture_history(
+            &changed,
+            &[],
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+        );
+        assert!(writer
+            .save_transfer_checkpoint(&changed, Some(&history))
+            .is_err());
+        assert_eq!(std::fs::read(&writer.path).unwrap(), before);
+        assert_eq!(std::fs::read(history_path).unwrap(), b"previous history");
+        std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transfer_checkpoint_history_failure_is_atomic_and_retryable_after_layout_commit() {
+        let mut writer = writer(true);
+        std::fs::write(&writer.path, b"unloaded original").unwrap();
+        let history_path = writer.path.with_file_name("session-history.json");
+        std::fs::write(&history_path, b"previous history").unwrap();
+        let temporary = history_path.with_extension("json.tmp");
+        std::fs::create_dir(&temporary).unwrap();
+        let snapshot = snapshot();
+        let history = super::super::capture_history(
+            &snapshot,
+            &[],
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+        );
+        assert!(writer
+            .save_transfer_checkpoint(&snapshot, Some(&history))
+            .is_err());
+        assert!(!writer.protect_unloaded);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&writer.path).unwrap())
+                .unwrap(),
+            serde_json::to_value(&snapshot).unwrap()
+        );
+        assert_eq!(std::fs::read(&history_path).unwrap(), b"previous history");
+        assert_eq!(backups(&writer), vec![b"unloaded original".to_vec()]);
+        std::fs::remove_dir(temporary).unwrap();
+        writer
+            .save_transfer_checkpoint(&snapshot, Some(&history))
+            .unwrap();
+        let saved: SessionHistorySnapshot =
+            serde_json::from_slice(&std::fs::read(history_path).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(saved).unwrap(),
+            serde_json::to_value(history).unwrap()
+        );
+        assert_eq!(backups(&writer), vec![b"unloaded original".to_vec()]);
+        std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
     }
 
     #[test]

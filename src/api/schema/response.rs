@@ -18,7 +18,7 @@ use super::plugins::{
 use super::server::ServerCapabilities;
 use super::session::SessionSnapshot;
 use super::tabs::TabInfo;
-use super::workspaces::WorkspaceInfo;
+use super::workspaces::{WorkspaceInfo, WorkspaceTransferInfo};
 use super::worktrees::{WorktreeInfo, WorktreeSourceInfo};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -53,6 +53,9 @@ pub enum ResponseResult {
     },
     WorkspaceInfo {
         workspace: WorkspaceInfo,
+    },
+    WorkspaceTransfer {
+        transfer: WorkspaceTransferInfo,
     },
     WorkspaceCreated {
         workspace: WorkspaceInfo,

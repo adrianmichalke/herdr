@@ -19,7 +19,16 @@ pub(super) struct C1XtgettcapResponse {
     pub(super) suppress_native: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg(unix)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct C1XtgettcapTransferState {
+    state: C1XtgettcapTrackerState,
+    raw_c1_intro: bool,
+    native_dcs_pending: bool,
+    body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 enum C1XtgettcapTrackerState {
     #[default]
     Ground,
@@ -37,6 +46,35 @@ enum C1XtgettcapTrackerState {
 }
 
 impl C1XtgettcapQueryTracker {
+    #[cfg(unix)]
+    pub(super) fn workspace_transfer_state(&self) -> Result<C1XtgettcapTransferState, String> {
+        if !self.pending.is_empty() {
+            return Err("terminal has undelivered legacy query replies".into());
+        }
+        Ok(C1XtgettcapTransferState {
+            state: self.state,
+            raw_c1_intro: self.raw_c1_intro,
+            native_dcs_pending: self.native_dcs_pending,
+            body: self.body.clone(),
+        })
+    }
+
+    #[cfg(unix)]
+    pub(super) fn restore_workspace_transfer_state(
+        &mut self,
+        state: C1XtgettcapTransferState,
+    ) -> Result<(), String> {
+        if state.body.len() > 1024 {
+            return Err("legacy query snapshot exceeds its parser buffer limit".into());
+        }
+        self.state = state.state;
+        self.raw_c1_intro = state.raw_c1_intro;
+        self.native_dcs_pending = state.native_dcs_pending;
+        self.body = state.body;
+        self.pending.clear();
+        Ok(())
+    }
+
     pub(super) fn observe(&mut self, bytes: &[u8]) {
         let mut index = 0;
         while index < bytes.len() {
@@ -258,6 +296,45 @@ fn append_upper_hex(bytes: &[u8], output: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_transfer_preserves_fragmented_query_and_native_suppression_state() {
+        for prefix in [
+            b"\x90+q".as_slice(),
+            b"\x1bP+q5463\x9c".as_slice(),
+            "history 界é🙂".as_bytes(),
+        ] {
+            let mut source = C1XtgettcapQueryTracker::default();
+            source.observe(prefix);
+            source.drain_pending();
+            let encoded = serde_json::to_vec(&source.workspace_transfer_state().unwrap()).unwrap();
+            let mut restored = C1XtgettcapQueryTracker::default();
+            restored
+                .restore_workspace_transfer_state(serde_json::from_slice(&encoded).unwrap())
+                .unwrap();
+            for bytes in [b"5463\x9c".as_slice(), b"\x1b[0m", b"\x90+q524742\x9c"] {
+                source.observe(bytes);
+                restored.observe(bytes);
+                assert_eq!(source.drain_pending(), restored.drain_pending());
+                assert_eq!(source.state, restored.state);
+                assert_eq!(source.body, restored.body);
+                assert_eq!(source.native_dcs_pending, restored.native_dcs_pending);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_transfer_rejects_undelivered_replies_and_oversized_query_state() {
+        let mut tracker = C1XtgettcapQueryTracker::default();
+        tracker.observe(b"\x90+q5463\x9c");
+        assert!(tracker.workspace_transfer_state().is_err());
+        tracker.drain_pending();
+        let mut state = tracker.workspace_transfer_state().unwrap();
+        state.body = vec![b'a'; 1025];
+        assert!(tracker.restore_workspace_transfer_state(state).is_err());
+    }
 
     fn observe_chunks(chunks: &[&[u8]]) -> (C1XtgettcapQueryTracker, Vec<C1XtgettcapResponse>) {
         let mut tracker = C1XtgettcapQueryTracker::default();

@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     io::{Read, Write},
-    os::fd::{AsRawFd, OwnedFd, RawFd},
+    os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
     sync::{mpsc as std_mpsc, Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -83,9 +83,12 @@ enum PtyIoDataCommand {
 
 enum PtyIoControlCommand {
     BeginHandoff(std_mpsc::Sender<std::io::Result<()>>),
-    DuplicateForHandoff(std_mpsc::Sender<std::io::Result<RawFd>>),
+    DuplicateForHandoff(std_mpsc::Sender<std::io::Result<OwnedFd>>),
     ForegroundProcessGroup(std_mpsc::Sender<Option<u32>>),
-    RollbackHandoff(std_mpsc::Sender<std::io::Result<()>>),
+    RollbackHandoff(
+        std_mpsc::Sender<std::io::Result<()>>,
+        Arc<Mutex<UserWriteGate>>,
+    ),
     ReleaseAfterCommit(std_mpsc::Sender<std::io::Result<()>>),
     Shutdown,
 }
@@ -291,6 +294,11 @@ impl PtyIoActorHandle {
     }
 
     pub(crate) fn duplicate_for_handoff(&self) -> std::io::Result<RawFd> {
+        self.duplicate_owned_for_handoff()
+            .map(IntoRawFd::into_raw_fd)
+    }
+
+    pub(crate) fn duplicate_owned_for_handoff(&self) -> std::io::Result<OwnedFd> {
         let (reply_tx, reply_rx) = std_mpsc::channel();
         self.control_tx
             .send(PtyIoControlCommand::DuplicateForHandoff(reply_tx))
@@ -316,23 +324,18 @@ impl PtyIoActorHandle {
     pub(crate) fn rollback_handoff(&self) -> std::io::Result<()> {
         let (reply_tx, reply_rx) = std_mpsc::channel();
         self.control_tx
-            .send(PtyIoControlCommand::RollbackHandoff(reply_tx))
+            .send(PtyIoControlCommand::RollbackHandoff(
+                reply_tx,
+                self.user_writes.clone(),
+            ))
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pty actor closed"))?;
         self.wake_actor();
-        let result = reply_rx.recv_timeout(Duration::from_secs(1)).map_err(|_| {
+        reply_rx.recv_timeout(Duration::from_secs(1)).map_err(|_| {
             std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "timed out waiting for PTY handoff rollback",
             )
-        })?;
-        if result.is_ok() {
-            let mut user_writes = self
-                .user_writes
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            user_writes.accepting = true;
-        }
-        result
+        })?
     }
 
     pub(crate) fn release_after_commit(&self) -> std::io::Result<()> {
@@ -686,6 +689,7 @@ impl PtyIoActorRunner {
             PtyIoControlCommand::DuplicateForHandoff(reply) => {
                 let result = if self.state == ActorState::Quiesced {
                     fd::duplicate_cloexec_fd(self.file.as_raw_fd())
+                        .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) })
                 } else {
                     Err(std::io::Error::other(
                         "PTY actor must be quiesced before handoff duplication",
@@ -698,7 +702,7 @@ impl PtyIoActorRunner {
                     crate::platform::foreground_process_group_id_for_tty_fd(self.file.as_raw_fd());
                 let _ = reply.send(result);
             }
-            PtyIoControlCommand::RollbackHandoff(reply) => {
+            PtyIoControlCommand::RollbackHandoff(reply, user_writes) => {
                 self.pending_handoff.take();
                 let result = if self.state == ActorState::Released {
                     Err(std::io::Error::new(
@@ -707,6 +711,10 @@ impl PtyIoActorRunner {
                     ))
                 } else {
                     self.state = ActorState::Running;
+                    user_writes
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .accepting = true;
                     Ok(())
                 };
                 let _ = reply.send(result);
@@ -1580,6 +1588,103 @@ mod tests {
         peer.read_exact(&mut buf).expect("peer receives after");
         assert_eq!(&buf, b"after");
         handle.shutdown();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn abandoned_handoff_duplicate_replies_close_the_owned_fd() {
+        let (mut runner, _peer) = actor_runner_for_unit_test();
+        runner.state = ActorState::Quiesced;
+        let socket =
+            std::fs::read_link(format!("/proc/self/fd/{}", runner.file.as_raw_fd())).unwrap();
+        let duplicates = || {
+            std::fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+                .filter(|target| *target == socket)
+                .count()
+        };
+        let before = duplicates();
+        let (reply, receiver) = std_mpsc::channel();
+        assert!(!runner.handle_control_command(PtyIoControlCommand::DuplicateForHandoff(reply)));
+        assert_eq!(duplicates(), before + 1);
+        drop(receiver);
+        assert_eq!(duplicates(), before);
+        let (reply, receiver) = std_mpsc::channel();
+        drop(receiver);
+        assert!(!runner.handle_control_command(PtyIoControlCommand::DuplicateForHandoff(reply)));
+        assert_eq!(duplicates(), before);
+    }
+
+    #[test]
+    fn rollback_reopens_user_write_gate_even_when_acknowledgment_is_abandoned() {
+        let (mut runner, _peer) = actor_runner_for_unit_test();
+        runner.state = ActorState::Quiesced;
+        let gate = Arc::new(Mutex::new(UserWriteGate { accepting: false }));
+        let (reply, receiver) = std_mpsc::channel();
+        drop(receiver);
+        assert!(!runner
+            .handle_control_command(PtyIoControlCommand::RollbackHandoff(reply, gate.clone())));
+        assert_eq!(runner.state, ActorState::Running);
+        assert!(gate.lock().unwrap().accepting);
+    }
+
+    #[test]
+    fn dropping_control_clone_does_not_resume_quiesced_actor() {
+        let (handle, mut peer, read_rx) = actor_with_socket_pair(false);
+        handle.begin_handoff(Duration::from_secs(1)).unwrap();
+        let control = handle.clone();
+        drop(control);
+        assert!(handle
+            .try_write_user_input(Bytes::from_static(b"blocked"))
+            .is_err());
+        peer.write_all(b"held").unwrap();
+        assert!(read_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        handle.rollback_handoff().unwrap();
+        assert_eq!(
+            read_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Bytes::from_static(b"held")
+        );
+        handle.shutdown();
+    }
+
+    #[test]
+    fn control_clone_does_not_keep_shutdown_actor_alive() {
+        let (handle, _peer, read_rx) = actor_with_socket_pair(false);
+        let control = handle.clone();
+        handle.shutdown();
+        drop(handle);
+        assert!(matches!(
+            read_rx.recv_timeout(Duration::from_secs(1)),
+            Err(std_mpsc::RecvTimeoutError::Disconnected)
+        ));
+        assert!(control.rollback_handoff().is_err());
+        assert!(control
+            .try_write_user_input(Bytes::from_static(b"closed"))
+            .is_err());
+    }
+
+    #[test]
+    fn control_clone_does_not_keep_released_actor_alive_or_close_transferred_fd() {
+        let (handle, mut peer, read_rx) = actor_with_socket_pair(false);
+        let control = handle.clone();
+        handle.begin_handoff(Duration::from_secs(1)).unwrap();
+        let transferred = control.duplicate_owned_for_handoff().unwrap();
+        let flags = unsafe { libc::fcntl(transferred.as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        handle.release_after_commit().unwrap();
+        drop(handle);
+        assert!(matches!(
+            read_rx.recv_timeout(Duration::from_secs(1)),
+            Err(std_mpsc::RecvTimeoutError::Disconnected)
+        ));
+        assert!(control.rollback_handoff().is_err());
+        peer.write_all(b"transferred").unwrap();
+        let mut file = std::fs::File::from(transferred);
+        let mut bytes = [0; 11];
+        file.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"transferred");
     }
 
     #[test]

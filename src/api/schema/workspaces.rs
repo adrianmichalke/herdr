@@ -48,6 +48,37 @@ cli_params! {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceTransferParams {
+    pub workspace_id: String,
+    pub destination_session: String,
+    pub transfer_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceTransferStatusParams {
+    pub transfer_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceTransferState {
+    Pending,
+    Committed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceTransferInfo {
+    pub transfer_id: String,
+    pub state: WorkspaceTransferState,
+    pub destination_session: String,
+    pub workspace_id: Option<String>,
+    pub focused_tab_id: Option<String>,
+    pub focused_pane_id: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceMoveParams {
     pub workspace_id: String,
     pub insert_index: usize,

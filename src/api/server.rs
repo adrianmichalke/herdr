@@ -22,6 +22,7 @@ use crate::ipc::{
     socket_file_identity, LocalStream, LocalStreamRead, SocketFileIdentity,
 };
 use crate::server::shutdown::{ServerStop, ShutdownReason};
+use crate::server::workspace_transfer::{journal::TransferRegistry, routing};
 
 #[cfg(test)]
 mod subscription_socket_tests;
@@ -39,6 +40,7 @@ pub struct ServerHandle {
     path: PathBuf,
     identity: SocketFileIdentity,
     running: Arc<AtomicBool>,
+    pub(crate) transfer_registry: TransferRegistry,
 }
 
 impl Drop for ServerHandle {
@@ -81,9 +83,44 @@ fn default_capabilities() -> Option<ServerCapabilities> {
 fn start_server_inner(
     api_tx: ApiRequestSender,
     event_hub: EventHub,
-    mut capabilities: Option<ServerCapabilities>,
+    capabilities: Option<ServerCapabilities>,
     server_stop: Option<ServerStop>,
 ) -> std::io::Result<ServerHandle> {
+    let transfer_registry =
+        TransferRegistry::open(crate::server::workspace_transfer::journal::path())?;
+    start_server_inner_with_registry(
+        api_tx,
+        event_hub,
+        capabilities,
+        server_stop,
+        transfer_registry,
+    )
+}
+
+#[cfg(unix)]
+pub(crate) fn start_server_with_transfer_registry(
+    api_tx: ApiRequestSender,
+    event_hub: EventHub,
+    server_stop: ServerStop,
+    transfer_registry: TransferRegistry,
+) -> std::io::Result<ServerHandle> {
+    start_server_inner_with_registry(
+        api_tx,
+        event_hub,
+        default_capabilities(),
+        Some(server_stop),
+        transfer_registry,
+    )
+}
+
+fn start_server_inner_with_registry(
+    api_tx: ApiRequestSender,
+    event_hub: EventHub,
+    mut capabilities: Option<ServerCapabilities>,
+    server_stop: Option<ServerStop>,
+    transfer_registry: TransferRegistry,
+) -> std::io::Result<ServerHandle> {
+    let connection_registry = transfer_registry.clone();
     let path = socket_path();
     prepare_socket_path(&path)?;
 
@@ -130,6 +167,7 @@ fn start_server_inner(
                 let capabilities = capabilities.clone();
                 let server_stop = server_stop.clone();
                 let connection_running = Arc::clone(&listener_running);
+                let transfer_registry = connection_registry.clone();
                 #[cfg(unix)]
                 let ssh_agents = ssh_agents.clone();
                 spawn_connection_handler(move || {
@@ -142,6 +180,7 @@ fn start_server_inner(
                         server_stop.as_ref(),
                         #[cfg(unix)]
                         ssh_agents.as_ref(),
+                        Some(&transfer_registry),
                     ) {
                         warn!(err = %err, "api connection failed");
                     }
@@ -164,6 +203,7 @@ fn start_server_inner(
         path,
         identity,
         running,
+        transfer_registry,
     })
 }
 
@@ -322,6 +362,7 @@ fn handle_connection(
         None,
         #[cfg(unix)]
         None,
+        None,
     )
 }
 
@@ -333,6 +374,7 @@ fn handle_connection_with_stop(
     capabilities: Option<ServerCapabilities>,
     server_stop: Option<&ServerStop>,
     #[cfg(unix)] ssh_agents: Option<&crate::platform::ssh_agent::SshAgentRegistry>,
+    transfer_registry: Option<&TransferRegistry>,
 ) -> std::io::Result<()> {
     if let Err(err) = stream.set_send_timeout(Some(STREAM_WRITE_TIMEOUT)) {
         debug!(err = %err, "api connection write timeout unavailable");
@@ -375,6 +417,48 @@ fn handle_connection_with_stop(
             return Ok(());
         }
     };
+
+    if let Some(registry) = transfer_registry {
+        match routing::resolve_when_ready(registry, &request, line, running) {
+            Ok(Some(forwarded)) => {
+                let request_id = request.id.clone();
+                if routing::is_deferred_report(&request) {
+                    let response =
+                        routing::request_once(registry, forwarded).unwrap_or_else(|error| {
+                            error_response_json(
+                                request_id,
+                                "forwarding_unavailable",
+                                error.to_string(),
+                            )
+                        });
+                    return write_text_line_allow_disconnect(&mut stream, &response);
+                }
+                if let Err(error) = routing::forward(&mut stream, registry, forwarded, running) {
+                    return write_text_line_allow_disconnect(
+                        &mut stream,
+                        &error_response_json(
+                            request_id,
+                            "forwarding_unavailable",
+                            error.to_string(),
+                        ),
+                    );
+                }
+                return Ok(());
+            }
+            Err(error) => {
+                let code = if error.kind() == io::ErrorKind::WouldBlock {
+                    "workspace_busy"
+                } else {
+                    "invalid_transfer_target"
+                };
+                return write_text_line_allow_disconnect(
+                    &mut stream,
+                    &error_response_json(request.id, code, error.to_string()),
+                );
+            }
+            Ok(None) => {}
+        }
+    }
 
     let request_id = request.id.clone();
     let method = api_method_name(&request.method);
@@ -1105,6 +1189,7 @@ mod tests {
                 None,
                 None,
                 Some(&worker_registry),
+                None,
             )
             .unwrap();
         });

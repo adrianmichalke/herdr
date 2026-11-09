@@ -256,6 +256,16 @@ mod tests {
         );
 
         assert_eq!(
+            actual.remove("workspace.transfer").as_deref(),
+            cfg!(unix)
+                .then_some("d504995e234025741cea04b8a4b10207ffe48bd16212d5b704e17e95b15976d1")
+        );
+        assert_eq!(
+            actual.remove("workspace.transfer.status").as_deref(),
+            cfg!(unix)
+                .then_some("dab8c68159ae89cde68908863d66ad23cbc64b44ddf30e288371df5225afa8e6")
+        );
+        assert_eq!(
             actual, expected,
             "an existing endpoint method changed shape; add load-bearing behavior as a new advertised method or explicitly gate new fields"
         );

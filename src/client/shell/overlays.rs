@@ -124,7 +124,13 @@ pub(in crate::client::shell) fn render_session_picker_overlay(
             inner.width,
             &format!(
                 "{} · {}",
-                if picker.new_name.is_some() {
+                if picker.is_transfer() {
+                    if picker.new_name.is_some() {
+                        "Move to new session"
+                    } else {
+                        "Move to session"
+                    }
+                } else if picker.new_name.is_some() {
                     "New session"
                 } else {
                     "Sessions"
@@ -141,7 +147,15 @@ pub(in crate::client::shell) fn render_session_picker_overlay(
             inner.x,
             inner.y + 1,
             inner.width,
-            &format!("current: {}", picker.current),
+            &format!(
+                "{}: {}",
+                if picker.is_transfer() {
+                    "source"
+                } else {
+                    "current"
+                },
+                picker.current
+            ),
             Style::default().fg(palette.overlay0).bg(palette.panel_bg),
         );
     }
@@ -277,14 +291,32 @@ pub(in crate::client::shell) fn render_session_picker_overlay(
             .entries
             .get(picker.selected)
             .and_then(|entry| entry.connection_error.as_deref());
-        let message = if picker.switching {
+        let message = if picker.noncancellable() {
+            picker.error.as_deref().unwrap_or(
+                if matches!(
+                    picker.purpose,
+                    super::super::sessions::SessionPickerPurpose::WorkspaceTransfer {
+                        phase: super::super::sessions::WorkspaceTransferPhase::Following,
+                        ..
+                    }
+                ) {
+                    "workspace moved · opening destination…"
+                } else {
+                    "moving workspace… cannot cancel after submission"
+                },
+            )
+        } else if picker.switching {
             "opening session… esc cancels"
         } else {
             picker
                 .error
                 .as_deref()
                 .or(selected_error)
-                .unwrap_or("↑↓ select · ↵ open · n new · esc cancel")
+                .unwrap_or(if picker.is_transfer() {
+                    "↑↓ select · ↵ move · n new · esc cancel"
+                } else {
+                    "↑↓ select · ↵ open · n new · esc cancel"
+                })
         };
         put_text(
             buffer,
@@ -302,6 +334,23 @@ pub(in crate::client::shell) fn render_session_picker_overlay(
         );
     }
     if footer_rows > 0 {
+        if picker.noncancellable() || picker.finished() {
+            let footer = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
+            if picker.finished() {
+                rendered.cancel = footer;
+            }
+            button(
+                buffer,
+                footer,
+                if picker.finished() {
+                    "esc close"
+                } else {
+                    "move submitted · cannot cancel"
+                },
+                Style::default().fg(palette.text).bg(palette.surface0),
+            );
+            return Some(rendered);
+        }
         let gap = u16::from(inner.width >= 8);
         let form = picker.new_name.is_some();
         let available = inner.width.saturating_sub(gap * if form { 1 } else { 2 });
@@ -324,7 +373,15 @@ pub(in crate::client::shell) fn render_session_picker_overlay(
         button(
             buffer,
             buttons[0],
-            if form { "↵ create" } else { "+ New session" },
+            if form {
+                if picker.is_transfer() {
+                    "↵ move"
+                } else {
+                    "↵ create"
+                }
+            } else {
+                "+ New session"
+            },
             if enabled {
                 Style::default()
                     .fg(contrast(palette))

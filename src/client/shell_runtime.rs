@@ -73,6 +73,17 @@ pub(super) fn dispatch_client_shell_actions(
                     create,
                 });
             }
+            shell::ClientShellAction::WorkspaceTransfer {
+                source,
+                request_id,
+                destination_session,
+            } => {
+                session_actions.push(session_switch::SessionAction::Transfer {
+                    source,
+                    request_id,
+                    destination_session,
+                });
+            }
             shell::ClientShellAction::SessionCancel { request_id } => {
                 session_actions.push(session_switch::SessionAction::Cancel { request_id });
             }
@@ -536,6 +547,7 @@ pub(super) fn complete_endpoint_activation(
             state.activation_completion = Some((
                 activation.target().clone(),
                 activation.target_generation(),
+                activation.serial(),
                 result,
             ));
         }
@@ -664,6 +676,7 @@ pub(super) fn rollback_endpoint_activation(
                 state.activation_completion = Some((
                     activation.target().clone(),
                     activation.target_generation(),
+                    activation.serial(),
                     Err(message.clone()),
                 ));
             }

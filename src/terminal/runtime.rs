@@ -22,6 +22,19 @@ impl TerminalRuntime {
     }
 
     #[cfg(unix)]
+    pub fn workspace_transfer_handle(
+        &self,
+        pane_id: u32,
+    ) -> std::io::Result<crate::pane::WorkspaceTransferHandle> {
+        self.0.workspace_transfer_handle(pane_id)
+    }
+
+    #[cfg(unix)]
+    pub fn set_transfer_drop_protection(&mut self, protected: bool) {
+        self.0.set_transfer_drop_protection(protected);
+    }
+
+    #[cfg(unix)]
     pub fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
         self.0.duplicate_handoff_fd()
     }

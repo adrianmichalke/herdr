@@ -5,7 +5,7 @@ impl ClientContextMenuOverlay {
         use ClientContextMenuAction as Action;
 
         let item = |label, action| ClientContextMenuItem { label, action };
-        match &self.target {
+        let mut items = match &self.target {
             ClientContextMenuTarget::Machine { .. } => vec![item("Sessions...", Action::Sessions)],
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
                 vec![item("Rename", Action::Rename), item("Close", Action::Close)]
@@ -80,7 +80,17 @@ impl ClientContextMenuOverlay {
                 ]);
                 items
             }
+        };
+        if matches!(
+            &self.target,
+            ClientContextMenuTarget::Workspace {
+                transfer_source: Some(_),
+                ..
+            }
+        ) {
+            items.push(item("Move to session...", Action::MoveToSession));
         }
+        items
     }
 }
 
@@ -126,6 +136,7 @@ impl ClientShellState {
         let collapsed = worktree.is_some_and(|worktree| {
             self.group_is_collapsed(&self.active_endpoint_id, &worktree.key)
         });
+        let transfer_source = self.workspace_transfer_source(&workspace_id);
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target: ClientContextMenuTarget::Workspace {
                 workspace_id,
@@ -134,6 +145,7 @@ impl ClientShellState {
                 has_worktree_children,
                 close_group,
                 collapsed,
+                transfer_source,
             },
             x,
             y,
@@ -218,8 +230,22 @@ impl ClientShellState {
             ClientContextMenuTarget::Workspace {
                 workspace_id,
                 close_group,
+                transfer_source,
                 ..
-            } => self.activate_workspace_context_action(workspace_id, close_group, action, outcome),
+            } => {
+                if action == ClientContextMenuAction::MoveToSession {
+                    if let Some(source) = transfer_source {
+                        self.open_workspace_transfer_picker(source, outcome);
+                    }
+                } else {
+                    self.activate_workspace_context_action(
+                        workspace_id,
+                        close_group,
+                        action,
+                        outcome,
+                    );
+                }
+            }
             ClientContextMenuTarget::Tab {
                 tab_id,
                 workspace_id,

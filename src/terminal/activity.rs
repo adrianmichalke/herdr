@@ -14,6 +14,7 @@ pub(crate) enum ActivityObservation {
     Reported,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) struct RestoredActivityBaseline {
     agent: String,
     state: AgentState,

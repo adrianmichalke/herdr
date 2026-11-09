@@ -20,7 +20,7 @@ pub enum AgentSessionRefKind {
     Path,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentResumePlan {
     pub agent: String,
     pub argv: Vec<String>,
@@ -28,7 +28,7 @@ pub struct AgentResumePlan {
 }
 
 /// A resume command reported by the agent itself, run in the restored pane.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportedAgentResume {
     pub source: String,
     pub agent: String,
@@ -88,7 +88,7 @@ pub fn validate_resume_argv(argv: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedAgentSession {
     pub source: String,
     pub agent: String,

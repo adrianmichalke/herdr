@@ -917,6 +917,9 @@ impl App {
         pane_id: crate::layout::PaneId,
         event: crate::ghostty::FocusEvent,
     ) {
+        if self.state.workspace_transfer_fenced(ws_idx) {
+            return;
+        }
         let Some(runtime) = self.state.workspaces.get(ws_idx).and_then(|_| {
             self.state
                 .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
@@ -936,6 +939,13 @@ impl App {
         &mut self,
         request: crate::api::schema::Request,
     ) -> String {
+        if self.transfer_request_is_fenced(&request) {
+            return responses::encode_error(
+                request.id,
+                "workspace_busy",
+                "workspace transfer is in progress",
+            );
+        }
         self.sync_pending_terminal_titles();
         use crate::api::schema::{
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
@@ -1062,6 +1072,13 @@ impl App {
                 );
             }
             Method::SessionSnapshot(_) => return self.handle_session_snapshot(request.id),
+            Method::WorkspaceTransfer(_) | Method::WorkspaceTransferStatus(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "unsupported_method",
+                    "workspace transfer requires a supported local server",
+                );
+            }
             Method::WorkspaceList(_) => return self.handle_workspace_list(request.id),
             Method::WorkspaceGet(target) => return self.handle_workspace_get(request.id, target),
             Method::WorkspaceCreate(params) => {
@@ -1391,7 +1408,7 @@ pub(super) mod test_support {
         }
         #[cfg(not(windows))]
         {
-            "/usr/bin/true"
+            "true"
         }
     }
 

@@ -83,6 +83,7 @@ mod notifications;
 mod render;
 mod retained_surface;
 mod surface_interest;
+mod workspace_transfer;
 
 // Producers can refill even a bounded channel while it is being drained.
 // Yield to scheduled work and rendering between batches; select! below
@@ -191,6 +192,9 @@ enum AltScreenReadConflict {
 /// The headless server — runs the herdr event loop without a real terminal.
 pub struct HeadlessServer {
     app: app::App,
+    transfer_registry: crate::server::workspace_transfer::journal::TransferRegistry,
+    #[cfg(unix)]
+    workspace_transfers: workspace_transfer::Coordinator,
     #[cfg(unix)]
     api_tx: Option<api::ApiRequestSender>,
     // Kept on every platform so dropping HeadlessServer owns API server shutdown.
@@ -324,6 +328,19 @@ impl HeadlessServer {
         api_server: Option<api::ServerHandle>,
         server_stop: ServerStop,
     ) -> io::Result<Self> {
+        let transfer_registry = match api_server.as_ref() {
+            Some(server) => server.transfer_registry.clone(),
+            None => crate::server::workspace_transfer::journal::TransferRegistry::open(
+                crate::server::workspace_transfer::journal::path(),
+            )?,
+        };
+        transfer_registry.sync_live_bindings(&app.state)?;
+        #[cfg(unix)]
+        let workspace_transfers = workspace_transfer::Coordinator::new(
+            transfer_registry.clone(),
+            app.render_notify.clone(),
+            true,
+        )?;
         let should_quit = server_stop.flag().clone();
         let client_path = client_socket_path();
         prepare_socket_path(&client_path)?;
@@ -350,6 +367,9 @@ impl HeadlessServer {
         let _ = api_tx;
         Ok(Self {
             app,
+            transfer_registry,
+            #[cfg(unix)]
+            workspace_transfers,
             #[cfg(unix)]
             api_tx,
             api_server,
@@ -410,6 +430,8 @@ impl HeadlessServer {
     /// - Handles scheduled tasks (session save, metadata expiry, etc.)
     /// - Renders virtually and streams frames to clients
     pub async fn run(&mut self) -> io::Result<()> {
+        #[cfg(unix)]
+        self.start_workspace_transfer_recovery()?;
         crate::logging::startup("server");
 
         let server_stop = self.server_stop.clone();
@@ -434,6 +456,11 @@ impl HeadlessServer {
         loop {
             crate::render_prof::event("loop.tick");
             crate::render_prof::flush_if_due();
+            #[cfg(unix)]
+            if self.pump_workspace_transfers() {
+                needs_render = true;
+                needs_full_render = true;
+            }
             self.app.reap_finished_detached_processes();
 
             // If shutdown has been initiated, complete it and exit.
@@ -750,7 +777,9 @@ impl HeadlessServer {
         let cell_size = client.cell_size;
         let (cols, rows) = self.effective_size;
         let area = Rect::new(0, 0, cols, rows);
-        if self.app.state.kitty_graphics_enabled && cell_size.is_known() {
+        if !self.app.state.workspace_transfer_fences.is_empty() {
+            self.compute_view_preserving_transfers(area, cell_size);
+        } else if self.app.state.kitty_graphics_enabled && cell_size.is_known() {
             crate::ui::compute_view_with_cell_size(
                 &mut self.app.state,
                 &self.app.terminal_runtimes,
@@ -1003,6 +1032,9 @@ impl HeadlessServer {
                     else {
                         continue;
                     };
+                    if self.app.state.workspace_transfer_fenced(workspace_index) {
+                        continue;
+                    }
                     let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
                         &self.app.terminal_runtimes,
                         workspace_index,
@@ -1754,6 +1786,18 @@ impl HeadlessServer {
             return false;
         }
 
+        if self.terminal_is_transfer_fenced(&terminal_id) {
+            self.send_to_client(
+                client_id,
+                ServerMessage::ServerShutdown {
+                    reason: Some(
+                        "terminal attach failed: workspace transfer is in progress; retry".into(),
+                    ),
+                },
+            );
+            self.remove_client_and_resize_if_needed(client_id);
+            return false;
+        }
         let Some(real_terminal_id) = self.terminal_id_by_string(&terminal_id) else {
             self.send_to_client(
                 client_id,
@@ -1848,6 +1892,9 @@ impl HeadlessServer {
     /// Handles a server event. Returns true if the event requires a re-render.
     fn handle_server_event(&mut self, ev: ServerEvent) -> bool {
         if self.handoff_in_progress && Self::ignore_client_event_during_handoff(&ev) {
+            return false;
+        }
+        if self.server_event_is_transfer_fenced(&ev) {
             return false;
         }
 
@@ -2918,6 +2965,116 @@ impl HeadlessServer {
             return false;
         }
 
+        let route = serde_json::to_string(&msg.request)
+            .map_err(io::Error::other)
+            .and_then(|line| {
+                crate::server::workspace_transfer::routing::resolve(
+                    &self.transfer_registry,
+                    &msg.request,
+                    &line,
+                )
+            });
+        match route {
+            Ok(Some(forward)) => {
+                let registry = self.transfer_registry.clone();
+                let id = msg.request.id;
+                let respond_to = msg.respond_to.clone();
+                let error_id = id.clone();
+                if let Err(error) =
+                    crate::thread_spawn::spawn_named("herdr-transfer-proxy", move || {
+                        let response = crate::server::workspace_transfer::routing::request_once(
+                            &registry, forward,
+                        )
+                        .unwrap_or_else(|error| {
+                            crate::server::workspace_transfer::error_response(
+                                id,
+                                "forwarding_unavailable",
+                                error.to_string(),
+                            )
+                        });
+                        let _ = respond_to.send(response);
+                    })
+                {
+                    let _ = msg
+                        .respond_to
+                        .send(crate::server::workspace_transfer::error_response(
+                            error_id,
+                            "forwarding_unavailable",
+                            error.to_string(),
+                        ));
+                }
+                return false;
+            }
+            Err(error) => {
+                let code = if error.kind() == io::ErrorKind::WouldBlock {
+                    "workspace_busy"
+                } else {
+                    "invalid_transfer_target"
+                };
+                let _ = msg
+                    .respond_to
+                    .send(crate::server::workspace_transfer::error_response(
+                        msg.request.id,
+                        code,
+                        error.to_string(),
+                    ));
+                return false;
+            }
+            Ok(None) => {}
+        }
+        if matches!(
+            &msg.request.method,
+            api::schema::Method::WorkspaceTransfer(_)
+                | api::schema::Method::WorkspaceTransferStatus(_)
+        ) {
+            return self.handle_workspace_transfer_api(msg);
+        }
+        if self.app.transfer_request_is_fenced(&msg.request) {
+            let _ = msg
+                .respond_to
+                .send(crate::server::workspace_transfer::error_response(
+                    msg.request.id,
+                    "workspace_busy",
+                    "workspace transfer is in progress",
+                ));
+            return false;
+        }
+        if matches!(
+            msg.request.method,
+            api::schema::Method::ServerLiveHandoff(_)
+        ) && self.workspace_transfers_preclude_handoff()
+        {
+            let _ = msg
+                .respond_to
+                .send(crate::server::workspace_transfer::error_response(
+                    msg.request.id,
+                    "workspace_busy",
+                    "workspace transfer must finish before a server handoff",
+                ));
+            return false;
+        }
+
+        if let Err(error) = self.reserve_local_transfer_name(&msg.request) {
+            let _ = msg
+                .respond_to
+                .send(crate::server::workspace_transfer::error_response(
+                    msg.request.id,
+                    "transfer_conflict",
+                    error.to_string(),
+                ));
+            return false;
+        }
+        let refresh_transfer_bindings = matches!(
+            msg.request.method,
+            api::schema::Method::AgentStart(_)
+                | api::schema::Method::AgentRename(_)
+                | api::schema::Method::WorkspaceClose(_)
+                | api::schema::Method::PaneClose(_)
+                | api::schema::Method::TabClose(_)
+                | api::schema::Method::PaneReleaseAgent(_)
+                | api::schema::Method::PaneClearAgentAuthority(_)
+        );
+
         let frozen_alt_screen_read = match self.alt_screen_read_conflict(&msg.request) {
             AltScreenReadConflict::None => None,
             AltScreenReadConflict::Frozen(snapshot) => Some(snapshot),
@@ -3090,6 +3247,11 @@ impl HeadlessServer {
             self.app
                 .handle_api_request_after_internal_events_drained(msg.request)
         };
+        if refresh_transfer_bindings {
+            if let Err(error) = self.transfer_registry.sync_live_bindings(&self.app.state) {
+                tracing::warn!(%error, "could not refresh transfer namespace bindings");
+            }
+        }
         if let Some(snapshot) = frozen_alt_screen_read {
             if let Ok(mut success) = serde_json::from_str::<api::schema::SuccessResponse>(&response)
             {

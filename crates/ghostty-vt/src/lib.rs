@@ -29,6 +29,7 @@ use crate::pane_graphics_files::OwnedExport;
 mod native_image_sources;
 mod native_source;
 pub mod pane_graphics_files;
+mod snapshot;
 
 /// Terminfo entry the terminal emulates; child processes should see it as TERM.
 pub const TERM: &str = "xterm-256color";
@@ -864,50 +865,14 @@ impl Terminal {
             ffi::ghostty_terminal_new(ptr::null(), &mut raw, cols, rows).into_result()?;
         }
 
-        let mut terminal = Self {
-            raw,
-            max_scrollback,
-            #[cfg(windows)]
-            tracked_row: ptr::null_mut(),
-            callback_state: Box::new(TerminalCallbackState {
-                size_report: ffi::GhosttySizeReportSize {
-                    rows,
-                    columns: cols,
-                    ..Default::default()
-                },
-                ..Default::default()
-            }),
-            kitty_fingerprints: Mutex::new(HashMap::new()),
-            kitty_empty_generation: Cell::new(None),
-            kitty_png_forwarding: false,
-        };
-        let userdata = (&mut *terminal.callback_state as *mut TerminalCallbackState).cast();
-        let glyph_protocol = false;
-        // libghostty enables image storage by default; Herdr opts in explicitly.
-        let kitty_storage_limit: u64 = 0;
-        let terminfo_name = ffi::GhosttyString {
-            ptr: TERM.as_ptr().cast(),
-            len: TERM.len(),
-        };
+        let mut terminal = Self::from_raw(raw, max_scrollback)?;
+        terminal.restore_snapshot_cell_size(0, 0);
+        terminal.configure_local_policies()?;
         let grapheme_default = ffi::GhosttyTerminalModeConfig {
             mode: MODE_GRAPHEME_CLUSTER,
             value: true,
         };
-        let clipboard_callback: ffi::GhosttyTerminalClipboardWriteFn =
-            Some(clipboard_write_trampoline);
         unsafe {
-            ffi::ghostty_terminal_set(
-                terminal.raw,
-                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT,
-                (&kitty_storage_limit as *const u64).cast(),
-            )
-            .into_result()?;
-            ffi::ghostty_terminal_set(
-                terminal.raw,
-                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_TERMINFO_NAME,
-                (&terminfo_name as *const ffi::GhosttyString).cast(),
-            )
-            .into_result()?;
             ffi::ghostty_terminal_set(
                 terminal.raw,
                 ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
@@ -920,6 +885,71 @@ impl Terminal {
                 (&grapheme_default as *const ffi::GhosttyTerminalModeConfig).cast(),
             )
             .into_result()?;
+        }
+        Ok(terminal)
+    }
+
+    fn configure_local_policies(&self) -> Result<(), Error> {
+        let glyph_protocol = false;
+        let kitty_storage_limit: u64 = 0;
+        let terminfo_name = ffi::GhosttyString {
+            ptr: TERM.as_ptr().cast(),
+            len: TERM.len(),
+        };
+        unsafe {
+            ffi::ghostty_terminal_set(
+                self.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT,
+                (&kitty_storage_limit as *const u64).cast(),
+            )
+            .into_result()?;
+            ffi::ghostty_terminal_set(
+                self.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_TERMINFO_NAME,
+                (&terminfo_name as *const ffi::GhosttyString).cast(),
+            )
+            .into_result()?;
+            ffi::ghostty_terminal_set(
+                self.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_GLYPH_PROTOCOL,
+                (&glyph_protocol as *const bool).cast(),
+            )
+            .into_result()?;
+        }
+        self.kitty_empty_generation
+            .set(Some(self.kitty_graphics_generation()?));
+        Ok(())
+    }
+
+    fn from_raw(raw: ffi::GhosttyTerminal, max_scrollback: usize) -> Result<Self, Error> {
+        let mut terminal = Self {
+            raw,
+            max_scrollback,
+            #[cfg(windows)]
+            tracked_row: ptr::null_mut(),
+            callback_state: Box::default(),
+            kitty_fingerprints: Mutex::new(HashMap::new()),
+            kitty_empty_generation: Cell::new(None),
+            kitty_png_forwarding: false,
+        };
+        let rows = terminal.rows()?;
+        let cols = terminal.cols()?;
+        terminal.callback_state.size_report = ffi::GhosttySizeReportSize {
+            rows,
+            columns: cols,
+            cell_width: terminal
+                .width_px()?
+                .checked_div(u32::from(cols))
+                .unwrap_or(0),
+            cell_height: terminal
+                .height_px()?
+                .checked_div(u32::from(rows))
+                .unwrap_or(0),
+        };
+        let userdata = (&mut *terminal.callback_state as *mut TerminalCallbackState).cast();
+        let clipboard_callback: ffi::GhosttyTerminalClipboardWriteFn =
+            Some(clipboard_write_trampoline);
+        unsafe {
             ffi::ghostty_terminal_set(
                 terminal.raw,
                 ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_USERDATA,
@@ -956,17 +986,7 @@ impl Terminal {
                 (color_scheme_trampoline as *const ()).cast(),
             )
             .into_result()?;
-            ffi::ghostty_terminal_set(
-                terminal.raw,
-                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_GLYPH_PROTOCOL,
-                (&glyph_protocol as *const bool).cast(),
-            )
-            .into_result()?;
         }
-        // Disabling storage advances its generation even though it is empty.
-        terminal
-            .kitty_empty_generation
-            .set(Some(terminal.kitty_graphics_generation()?));
         Ok(terminal)
     }
 

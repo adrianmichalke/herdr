@@ -58,6 +58,22 @@ fn retain_checkout(leases: &mut Leases, checkout: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+pub(crate) fn retain_transferred(
+    leases: &mut Leases,
+    plugins: &[InstalledPluginInfo],
+) -> io::Result<()> {
+    if plugins.is_empty() {
+        return Ok(());
+    }
+    crate::persist::plugin_registry::with_registry_lock(|| {
+        for plugin in plugins {
+            retain_checkout(leases, Path::new(&plugin.plugin_root))?;
+        }
+        Ok(())
+    })
+}
+
 // Pin failures leave a registered installation unprotected only after it is
 // replaced; plugin store errors must not hide every plugin.
 pub(crate) fn load(leases: &mut Leases) -> io::Result<Vec<InstalledPluginInfo>> {

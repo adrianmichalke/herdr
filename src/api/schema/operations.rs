@@ -8,7 +8,7 @@ pub(crate) struct Operation {
 }
 
 macro_rules! define_operations {
-    ($( $variant:ident($params:ty) => $name:literal, $changes_ui:literal, $client_shell:literal; )*) => {
+    ($( $variant:ident($params:ty) => $name:literal, $changes_ui:literal, $client_shell:expr; )*) => {
         #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
         #[serde(tag = "method", content = "params")]
         // Request enums are short-lived wire values; keeping variants direct preserves

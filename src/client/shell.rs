@@ -32,6 +32,8 @@ mod preferences;
 mod render;
 mod scroll;
 mod sessions;
+mod workspace_transfer;
+pub(crate) use workspace_transfer::{WorkspaceTransferSource, WORKSPACE_TRANSFER_METHODS};
 mod settings;
 mod state;
 mod surface_patch;
@@ -283,3 +285,5 @@ fn blit_pane_surface(target: &mut FrameData, source: &FrameData, area: Rect) {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(super) use tests::snapshot as test_snapshot;

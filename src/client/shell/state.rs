@@ -265,6 +265,11 @@ pub(crate) enum ClientShellAction {
         session: String,
         create: bool,
     },
+    WorkspaceTransfer {
+        source: WorkspaceTransferSource,
+        request_id: u64,
+        destination_session: String,
+    },
     SessionCancel {
         request_id: u64,
     },
@@ -528,6 +533,7 @@ pub(super) struct ClientWorktreeRemoveOverlay {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientContextMenuAction {
     Sessions,
+    MoveToSession,
     Rename,
     Close,
     NewWorktree,
@@ -557,6 +563,7 @@ pub(super) enum ClientContextMenuTarget {
         has_worktree_children: bool,
         close_group: bool,
         collapsed: bool,
+        transfer_source: Option<WorkspaceTransferSource>,
     },
     Tab {
         tab_id: String,
@@ -929,6 +936,7 @@ pub(crate) struct ClientShellState {
     pub(super) reveal_navigation_workspace: bool,
     pub(super) overlay: Option<ClientShellOverlay>,
     pub(super) session_picker_serial: u64,
+    pub(super) session_navigation_serial: u64,
     pub(super) previous_pane_id: Option<String>,
     pub(super) pane_mouse_gesture: Option<ClientPaneMouseGesture>,
     pub(super) link_hover: Option<super::link_hover::LinkHover>,
@@ -1115,6 +1123,7 @@ impl ClientShellState {
             reveal_navigation_workspace: false,
             overlay,
             session_picker_serial: 0,
+            session_navigation_serial: 0,
             previous_pane_id: None,
             pane_mouse_gesture: None,
             link_hover: None,

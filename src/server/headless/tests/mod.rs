@@ -55,7 +55,7 @@ fn client_agent_view_projection(
     serde_json::from_str(&data).expect("decode client agent view projection")
 }
 
-fn test_headless_server() -> HeadlessServer {
+pub(super) fn test_headless_server() -> HeadlessServer {
     test_headless_server_with_event_hub(api::EventHub::default())
 }
 
@@ -98,8 +98,19 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
     let server_keybindings = app_keybindings(&app);
     let headless_size = app.state.headless_size;
 
+    let transfer_registry = crate::server::workspace_transfer::journal::TransferRegistry::memory();
+    #[cfg(unix)]
+    let workspace_transfers = workspace_transfer::Coordinator::new(
+        transfer_registry.clone(),
+        app.render_notify.clone(),
+        false,
+    )
+    .unwrap();
     HeadlessServer {
         app,
+        transfer_registry,
+        #[cfg(unix)]
+        workspace_transfers,
         #[cfg(unix)]
         api_tx: None,
         api_server: None,
