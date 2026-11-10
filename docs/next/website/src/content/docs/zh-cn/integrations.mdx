@@ -85,6 +85,30 @@ Herdr 把内置扩展写入:
 
 如果设置了 `PI_CODING_AGENT_DIR`,Herdr 会改为写入 `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts`。如果 Pi agent 目录已经存在,Herdr 会创建 extensions 目录。卸载只删除那个扩展文件。
 
+### 全局快速模式偏好
+
+此分支为现有的 Pi `/fast` 扩展提供辅助模块，复用私有、原子写入的用户级偏好存储，与 Discord 通知设置独立。它也适用于 Herdr 之外的 Pi 会话，不会更改 Codex CLI 设置。
+
+请迁移现有入口文件，不要新增第二个 `/fast` 扩展。对于此分支使用的共享本地 Pi 包，先验证:
+
+```bash
+python3 scripts/install_pi_fast_preference.py \
+  --extension ~/workspace/nextcloud/pi-shared/openai-codex-fast-mode/pi-fast-mode-extension.js \
+  --check
+```
+
+去掉 `--check` 后再次运行即可安装。其他布局请通过 `--extension` 指定现有快速模式扩展的 JavaScript 或 TypeScript 入口文件。安装器识别原始的内存状态版本及其环境变量/Codex 路由器版本，也支持 Windows 换行；对于未知或自定义实现，它会拒绝覆盖。原文件保存在私有的 `.herdr-pi-preferences/fast-mode.original` 中，辅助模块安装在入口文件旁。它不更改 Pi 包设置、对话历史或当前偏好值，重复安装是幂等的。
+
+对于已经运行的 Pi 会话，在空闲时重新加载扩展一次。此后，`/fast on`、`/fast off`、`/fast toggle`（或 `/fast`）和 `/fast status` 统一使用 Pi `getAgentDir()` 下的 `preferences/fast-mode.json`。Pi 会遵循 `PI_CODING_AGENT_DIR`。默认值为 **off**，即使旧的 `PI_CODEX_FAST_MODE` 环境变量或历史会话/分支状态表示已开启，也不会自动启用。新建、恢复、fork 或切换分支后的会话使用同一个文件，不向对话历史写入设置。
+
+适用请求为 `openai` / `openai-responses` 和 `openai-codex` / `openai-codex-responses`。现有 Codex `jev-auto` 虚拟路由器仅在其请求模型能解析为目录中的 Codex Responses 模型时受支持；分类器及无关请求体保持不变。其他提供方、API 或无法解析的虚拟模型不受修改，页脚显示 `fast:global:on (n/a)` 或 `fast:global:off (n/a)`。切换到不适用的模型不会清除全局偏好。
+
+每个适用请求在构建提供方请求体时重新读取偏好。开启时设置 `service_tier: "priority"`；关闭时移除过期的请求局部 tier，使用提供方的正常默认行为。Codex 的 SSE、WebSocket、缓存 WebSocket 及回退路径遵循同一策略；OpenAI Responses 使用其支持的 HTTP/SSE 传输。所选模型、思考级别、工具及正在执行的请求不会被更改或中断。
+
+空闲会话的页脚在一秒内同步。`fast:global:off!` 表示偏好无法读取或无效，此时安全地使用默认 tier；若文件可写，可通过显式命令修复。偏好以私有文件原子写入，并发修改采用最后写入者生效的语义。加载扩展、更改偏好及查询状态都不会发出测试请求。**优先处理可能产生更高费用**，`/fast on` 和状态反馈会明确提示。
+
+`just pi-fast-preference-test` 验证安装器和多会话偏好行为。将 `PI_AI_TEST_PACKAGE_DIR` 指向已安装的 `@earendil-works/pi-ai` 包，还可通过回环服务器和无效测试凭据验证实际 HTTP/SSE、WebSocket 序列化。Linux CI 安装固定版本的测试专用依赖；这些测试不会调用付费端点。
+
 ## OMP
 
 安装 OMP 集成:

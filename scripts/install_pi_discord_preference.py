@@ -83,10 +83,10 @@ def patch_extension(source):
 
 
 @contextmanager
-def installation_lock(support):
+def installation_lock(support, label="Discord"):
     path = support / ".install.lock"
     if path.is_symlink() or (path.exists() and (not path.is_file() or path.stat().st_nlink != 1)):
-        raise ValueError("Invalid Discord preference installer lock")
+        raise ValueError(f"Invalid {label} preference installer lock")
     descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         try:
@@ -100,13 +100,13 @@ def installation_lock(support):
                 import fcntl
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            raise ValueError("Another Discord preference installation is in progress; retry when it finishes") from None
+            raise ValueError(f"Another {label} preference installation is in progress; retry when it finishes") from None
         yield
     finally:
         os.close(descriptor)
 
 
-def atomic_write(path, content, expected=None):
+def atomic_write(path, content, expected=None, label="Discord"):
     descriptor, temporary = tempfile.mkstemp(prefix=".herdr-preference-", dir=path.parent)
     try:
         with os.fdopen(descriptor, "wb") as file:
@@ -116,7 +116,7 @@ def atomic_write(path, content, expected=None):
         if expected is not None:
             metadata = path.lstat()
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or path.read_bytes() != expected:
-                raise ValueError("Discord extension changed during installation; retry after the other edit finishes")
+                raise ValueError(f"{label} extension changed during installation; retry after the other edit finishes")
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):

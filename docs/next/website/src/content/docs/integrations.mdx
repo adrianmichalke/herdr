@@ -133,6 +133,30 @@ Commands and automatic-notification gates reread the file immediately. Other run
 
 Loading or changing the preference never sends a ready/test notification. Manual sends and explicit notification tests still work while automatic notifications are off. No webhook credential is stored in the preference file or copied into this repository. The generic boolean storage is reusable by other Pi preferences; this integration does not change `/fast` or model/request settings.
 
+### Global fast-mode preference
+
+This fork also provides a companion for the existing Pi `/fast` extension. It reuses the global preference storage above but keeps fast mode independent of Discord notifications. It works outside Herdr and does not change Codex CLI settings.
+
+Migrate the existing entry point rather than adding a second `/fast` extension. For the shared local Pi package used by this fork, validate first:
+
+```bash
+python3 scripts/install_pi_fast_preference.py \
+  --extension ~/workspace/nextcloud/pi-shared/openai-codex-fast-mode/pi-fast-mode-extension.js \
+  --check
+```
+
+Run the same command without `--check` to install. For another layout, pass its existing JavaScript or TypeScript fast-mode entry point with `--extension`. The installer recognizes the original in-memory extension and its environment-backed Codex-router variant, including Windows line endings; it refuses unknown or customized implementations rather than discarding user code. It preserves a private `.herdr-pi-preferences/fast-mode.original` backup, installs companion modules beside that entry point, and does not modify Pi package settings, conversations, or the preference itself. Reinstallation is idempotent. The shared Discord support remains independent.
+
+Reload extensions once in already-running Pi sessions when they are idle. Then `/fast on`, `/fast off`, `/fast toggle` (or `/fast`), and `/fast status` control or report the single user-level `preferences/fast-mode.json` under Pi's `getAgentDir()`. `PI_CODING_AGENT_DIR` is respected by Pi. The default is **off**, even if the legacy `PI_CODEX_FAST_MODE` environment variable or historical session/branch state says otherwise. New, resumed, forked, and branch-switched sessions use the same file; nothing is written into conversation history.
+
+Applicable requests are `openai` / `openai-responses` and `openai-codex` / `openai-codex-responses`. The existing Codex `jev-auto` virtual router is supported only when its outgoing model resolves to a Codex Responses model in the catalog; classifier and unrelated payloads remain unchanged. Other providers, APIs, and opaque virtual models are left unchanged, with `fast:global:on (n/a)` or `fast:global:off (n/a)` in the footer. The configured preference is retained when switching to an unsupported model.
+
+Each applicable request rereads the global preference at the provider-payload boundary. On requests set `service_tier: "priority"`; off requests omit the field to use the provider's normal default, removing any stale request-local tier. Codex's SSE, WebSocket, cached WebSocket, and fallback paths receive the same policy. OpenAI Responses uses its supported HTTP/SSE transport. Models, thinking levels, tools, and already-in-flight requests are not changed or interrupted.
+
+Footer indicators synchronize within one second while idle. `fast:global:off!` indicates an unavailable or invalid preference and fails closed to the default tier; an explicit command can repair a writable invalid file. Writes are private and atomic, with the same last-writer-wins behavior as the Discord preference. Loading the extension, changing the preference, and asking for status never makes a test request. **Priority processing may cost more**; `/fast on` and status feedback make that explicit.
+
+`just pi-fast-preference-test` covers the installer and multi-session preference behavior. Set `PI_AI_TEST_PACKAGE_DIR` to an installed `@earendil-works/pi-ai` package to additionally exercise real Responses HTTP/SSE and Codex WebSocket serialization against a loopback server with inert test credentials. Linux CI installs the pinned test-only Pi AI dependency; these tests never call a paid endpoint.
+
 ## OMP
 
 Install the OMP integration:

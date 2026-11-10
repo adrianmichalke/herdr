@@ -85,6 +85,30 @@ Herdr はバンドルされた拡張を次の場所に書き込みます:
 
 `PI_CODING_AGENT_DIR` が設定されている場合は、代わりに `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts` に書き込みます。Pi の agent ディレクトリが存在する場合、Herdr は extensions ディレクトリを作成します。アンインストールはその拡張ファイルだけを削除します。
 
+### グローバルな高速モード設定
+
+このフォークには、既存の Pi `/fast` 拡張向けの補助モジュールがあります。ユーザーレベルの非公開・アトミックな設定ストレージを再利用し、Discord 通知設定とは独立して動作します。Herdr の外でも利用でき、Codex CLI の設定は変更しません。
+
+2 つ目の `/fast` 拡張を追加せず、既存のエントリーポイントを移行してください。このフォークで使用する共有ローカル Pi パッケージでは、まず次のコマンドで検証します:
+
+```bash
+python3 scripts/install_pi_fast_preference.py \
+  --extension ~/workspace/nextcloud/pi-shared/openai-codex-fast-mode/pi-fast-mode-extension.js \
+  --check
+```
+
+インストールするには `--check` を外して再実行します。別の配置では、既存の JavaScript または TypeScript の高速モード拡張を `--extension` に指定してください。インストーラーは、元のメモリー内設定版と環境変数・Codex ルーター対応版を認識し、Windows の改行にも対応します。未知の実装やカスタマイズされたコードは上書きしません。元のファイルを非公開の `.herdr-pi-preferences/fast-mode.original` にバックアップし、補助モジュールを隣接するディレクトリに配置します。Pi のパッケージ設定、会話履歴、現在の設定値は変更しません。再インストールは冪等です。
+
+起動済みの Pi セッションでは、作業がアイドルになってから一度だけ拡張を再読み込みします。その後は `/fast on`、`/fast off`、`/fast toggle`（または `/fast`）、`/fast status` が、Pi の `getAgentDir()` 配下にある共通の `preferences/fast-mode.json` を使用します。Pi の `PI_CODING_AGENT_DIR` 設定も適用されます。初期値は **off** で、従来の `PI_CODEX_FAST_MODE` 環境変数や履歴・ブランチ内の状態から有効化されることはありません。新規、再開、fork、ブランチ切り替え後のセッションでも同じ設定を使用し、会話履歴には書き込みません。
+
+対象は `openai` / `openai-responses` と `openai-codex` / `openai-codex-responses` です。既存の Codex `jev-auto` 仮想ルーターでは、送信先モデルをカタログの Codex Responses モデルとして解決できる場合にのみ適用します。分類器や無関係なペイロードは変更しません。その他のプロバイダー、API、解決できない仮想モデルは変更せず、フッターに `fast:global:on (n/a)` または `fast:global:off (n/a)` と表示します。未対応モデルへの切り替えでも設定値は保持します。
+
+対象リクエストごとに、プロバイダーのペイロードを構築する段階で設定を読み直します。on では `service_tier: "priority"` を設定し、off では古いリクエストローカルの tier を取り除いて通常のデフォルトを使用します。Codex の SSE、WebSocket、キャッシュ付き WebSocket、フォールバック経路には同じ方針を適用します。OpenAI Responses では対応する HTTP/SSE を使用します。モデル、思考レベル、ツール、実行中のリクエストを変更・中断しません。
+
+アイドル中のフッターは 1 秒以内に同期します。`fast:global:off!` は設定が読めない、または無効であることを示し、デフォルトの tier に戻ります。書き込み可能なら明示的なコマンドで修復できます。設定は非公開ファイルとしてアトミックに保存し、同時更新は最後の書き込みを優先します。読み込み、設定変更、状態確認でテストリクエストは送信しません。**優先処理では料金が高くなる可能性があります。** `/fast on` と状態表示でもその点を通知します。
+
+`just pi-fast-preference-test` はインストーラーと複数セッションでの動作を検証します。`PI_AI_TEST_PACKAGE_DIR` にインストール済みの `@earendil-works/pi-ai` パッケージを指定すると、無効なテスト資格情報とループバックサーバーを使って実際の HTTP/SSE・WebSocket シリアライズも検証します。Linux CI は固定バージョンのテスト専用依存関係をインストールし、有料エンドポイントには接続しません。
+
 ## OMP
 
 OMP インテグレーションをインストールします:
