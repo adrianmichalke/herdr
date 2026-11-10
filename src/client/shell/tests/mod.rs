@@ -248,6 +248,7 @@ pub(super) fn surface_with_popup() -> PaneSurfaceFrame {
 }
 
 mod agent_activity;
+mod agent_unseen;
 mod agents_worktrees_notifications;
 mod chrome_context;
 mod close_pane;

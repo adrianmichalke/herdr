@@ -96,6 +96,16 @@ fn fast_path_blocker(
             .any(|hit| hit.pane_id == pane.pane_id)
     }) {
         Some("client_surface_patch.fallback.pane_hits")
+    } else if state.outer_focused != Some(false)
+        && state.pane_surface.as_ref().is_some_and(|surface| {
+            state
+                .endpoints
+                .iter()
+                .find(|endpoint| endpoint.endpoint_id == state.active_endpoint_id)
+                .is_some_and(|endpoint| endpoint.agent_presentation.has_marked_surface(surface))
+        })
+    {
+        Some("client_surface_patch.fallback.unseen")
     } else {
         None
     }

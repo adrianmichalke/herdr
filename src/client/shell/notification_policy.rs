@@ -330,16 +330,18 @@ impl ClientShellState {
                 NotificationValidation::Current
             };
         };
-        let Some(agent) = self
+        let Some((endpoint, agent)) = self
             .endpoints
             .iter()
             .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
-            .and_then(|endpoint| endpoint.snapshot.as_deref())
-            .and_then(|snapshot| {
-                snapshot
+            .and_then(|endpoint| {
+                endpoint
+                    .snapshot
+                    .as_deref()?
                     .agents
                     .iter()
                     .find(|agent| agent.pane_id == pane_id)
+                    .map(|agent| (endpoint, agent))
             })
         else {
             return NotificationValidation::AwaitingSnapshot;
@@ -351,7 +353,8 @@ impl ClientShellState {
                 NotificationValidation::Current
             }
             SemanticNotificationKind::Finished
-                if agent.agent_status == crate::api::schema::AgentStatus::Done =>
+                if agent.agent_status == crate::api::schema::AgentStatus::Done
+                    && !endpoint.agent_presentation.marked_unseen(agent) =>
             {
                 NotificationValidation::Current
             }

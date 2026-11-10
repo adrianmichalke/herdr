@@ -564,6 +564,7 @@ pub(super) enum ClientContextMenuAction {
     Sessions,
     MoveToSession,
     MoveToSpace,
+    MarkUnseen,
     Rename,
     Close,
     NewWorktree,
@@ -583,6 +584,12 @@ pub(super) enum ClientContextMenuAction {
 
 #[derive(Debug)]
 pub(super) enum ClientContextMenuTarget {
+    Agent {
+        endpoint_id: ClientEndpointId,
+        boot_id: String,
+        pane_id: String,
+        state_change_seq: u64,
+    },
     Machine {
         endpoint_id: ClientEndpointId,
     },
