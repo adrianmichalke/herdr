@@ -1,6 +1,296 @@
 use super::*;
 use crate::input::TerminalKey;
 
+fn with_tab_settings_config(
+    content: &str,
+    test: impl FnOnce(&mut ClientShellState, &std::path::Path),
+) {
+    let _lock = crate::config::test_config_env_lock().lock().unwrap();
+    struct RestoreConfig {
+        previous: Option<std::ffi::OsString>,
+        directory: std::path::PathBuf,
+    }
+    impl Drop for RestoreConfig {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, previous);
+            } else {
+                std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+            }
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+    let restore = RestoreConfig {
+        previous: std::env::var_os(crate::config::CONFIG_PATH_ENV_VAR),
+        directory: std::env::temp_dir().join(format!("herdr-tab-settings-{}", std::process::id())),
+    };
+    std::fs::create_dir_all(&restore.directory).unwrap();
+    let path = restore.directory.join("config.toml");
+    std::fs::write(&path, content).unwrap();
+    std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+    let config: Config = toml::from_str(content).unwrap();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.open_settings_overlay();
+    test(&mut state, &path);
+}
+
+fn assert_tab_settings(state: &ClientShellState, wrap: bool, max_rows: u16) {
+    assert_eq!(state.config.tab_bar_wrap, wrap);
+    assert_eq!(state.config.tab_bar_max_rows, max_rows);
+    let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_ref() else {
+        panic!("settings overlay");
+    };
+    assert_eq!(settings.tab_bar_wrap, wrap);
+    assert_eq!(settings.tab_bar_max_rows, max_rows);
+}
+
+fn tab_settings_text(state: &mut ClientShellState) -> String {
+    let frame = state.compose(106, 30).expect("tab settings frame");
+    frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn tabs_settings_initial_values_normalize_zero_rows() {
+    let config: Config =
+        toml::from_str("[ui]\ntab_bar_wrap = true\ntab_bar_max_rows = 0\n").unwrap();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.open_settings_overlay();
+    state.select_settings_section(
+        ClientSettingsSection::Tabs,
+        &mut ClientShellInput::default(),
+    );
+    assert_tab_settings(&state, true, 1);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::Settings(ref settings)) if settings.selected == 1
+    ));
+}
+
+#[test]
+fn tabs_settings_show_current_values_and_four_non_previewing_choices() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.open_settings_overlay();
+    let mut outcome = ClientShellInput::default();
+    state.select_settings_section(ClientSettingsSection::Tabs, &mut outcome);
+    assert!(outcome.actions.is_empty());
+    assert_tab_settings(&state, false, 3);
+    let text = tab_settings_text(&mut state);
+    assert!(text.contains("Current: single row · Maximum rows: 3"));
+    for label in [
+        "Single row",
+        "Wrapped rows",
+        "Decrease maximum rows (3 → 2)",
+        "Increase maximum rows (3 → 4)",
+    ] {
+        assert!(text.contains(label), "missing {label:?} in {text:?}");
+    }
+    assert_eq!(state.hits.settings_choices.len(), 4);
+    state.move_settings_selection(20);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::Settings(ref settings)) if settings.selected == 3
+    ));
+    assert_tab_settings(&state, false, 3);
+}
+
+#[test]
+fn tabs_settings_mouse_apply_reloads_only_tab_settings_and_keeps_custom_maximum() {
+    let content = r#"onboarding = false
+[theme]
+name = "nord"
+[ui]
+sidebar_width = 31
+tab_bar_position = "bottom"
+tab_bar_wrap = false
+tab_bar_max_rows = 7
+[ui.sound]
+enabled = false
+[keys]
+prefix = "ctrl+a"
+"#;
+    with_tab_settings_config(content, |state, path| {
+        state.compose(106, 30).expect("settings tabs");
+        let tab = state
+            .hits
+            .settings_tabs
+            .iter()
+            .find(|(_, section)| *section == ClientSettingsSection::Tabs)
+            .expect("tabs section hit")
+            .0;
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: tab.x + 1,
+            row: tab.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+        let select = state.handle_raw_events(vec![RawInputEvent::Key(TerminalKey::new(
+            KeyCode::Down,
+            KeyModifiers::empty(),
+        ))]);
+        assert!(select.actions.is_empty());
+        assert_tab_settings(state, false, 7);
+        state.compose(106, 30).expect("tab settings apply button");
+        let apply = state.hits.overlay_primary;
+        let outcome =
+            state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: apply.x + 1,
+                row: apply.y,
+                modifiers: KeyModifiers::empty(),
+            })]);
+        assert!(outcome.repaint);
+        assert!(outcome.resize);
+        assert!(matches!(
+            &outcome.actions[..],
+            [ClientShellAction::Endpoint { request, .. }]
+                if matches!(request.method, crate::api::schema::Method::ServerReloadConfig(_))
+        ));
+        assert_tab_settings(state, true, 7);
+        let updated = std::fs::read_to_string(path).unwrap();
+        let mut expected: toml::Value = toml::from_str(content).unwrap();
+        expected["ui"]["tab_bar_wrap"] = toml::Value::Boolean(true);
+        assert_eq!(toml::from_str::<toml::Value>(&updated).unwrap(), expected);
+        assert!(tab_settings_text(state).contains("Current: wrapped rows · Maximum rows: 7"));
+
+        state.select_settings_choice(0);
+        state.apply_settings_choice(&mut ClientShellInput::default());
+        assert_tab_settings(state, false, 7);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), content);
+        assert!(tab_settings_text(state).contains("Current: single row · Maximum rows: 7"));
+        state.cancel_settings_overlay();
+        assert!(!state.config.tab_bar_wrap);
+        assert_eq!(state.config.tab_bar_max_rows, 7);
+    });
+}
+
+#[test]
+fn tabs_settings_row_adjustments_clamp_saturate_and_preserve_wrap_mode() {
+    with_tab_settings_config("[ui]\ntab_bar_max_rows = 1\n", |state, path| {
+        state.select_settings_section(
+            ClientSettingsSection::Tabs,
+            &mut ClientShellInput::default(),
+        );
+        for (choice, wrap, max_rows) in [
+            (2, false, 1),
+            (3, false, 2),
+            (1, true, 2),
+            (3, true, 3),
+            (0, false, 3),
+            (2, false, 2),
+        ] {
+            state.select_settings_choice(choice);
+            let mut outcome = ClientShellInput::default();
+            state.apply_settings_choice(&mut outcome);
+            assert!(outcome.resize);
+            assert_tab_settings(state, wrap, max_rows);
+            let config: Config = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(config.ui.tab_bar_wrap, wrap);
+            assert_eq!(config.ui.tab_bar_max_rows, max_rows);
+        }
+        std::fs::write(
+            path,
+            "[ui]\ntab_bar_wrap = true\ntab_bar_max_rows = 65535\n",
+        )
+        .unwrap();
+        state.reload_client_config();
+        state.select_settings_choice(3);
+        state.apply_settings_choice(&mut ClientShellInput::default());
+        assert_tab_settings(state, true, u16::MAX);
+        assert!(tab_settings_text(state).contains("Increase maximum rows (65535 → 65535)"));
+        state.select_settings_choice(2);
+        state.apply_settings_choice(&mut ClientShellInput::default());
+        assert_tab_settings(state, true, u16::MAX - 1);
+    });
+}
+
+#[test]
+fn tabs_settings_live_reload_refreshes_display_and_preserves_values_on_errors() {
+    with_tab_settings_config("", |state, path| {
+        state.select_settings_section(
+            ClientSettingsSection::Tabs,
+            &mut ClientShellInput::default(),
+        );
+        std::fs::write(path, "[ui]\ntab_bar_wrap = true\ntab_bar_max_rows = 0\n").unwrap();
+        state.reload_client_config();
+        assert_tab_settings(state, true, 1);
+        assert!(tab_settings_text(state).contains("Current: wrapped rows · Maximum rows: 1"));
+
+        for invalid in [
+            "[ui]\ntab_bar_wrap = false\ntab_bar_max_rows = -1\n",
+            "[ui\ntab_bar_wrap = false\n",
+        ] {
+            std::fs::write(path, invalid).unwrap();
+            state.reload_client_config();
+            assert_tab_settings(state, true, 1);
+            assert!(state.local_config_diagnostic.is_some());
+        }
+
+        std::fs::write(path, "[ui]\ntab_bar_wrap = false\ntab_bar_max_rows = 12\n").unwrap();
+        state.reload_client_config();
+        assert_tab_settings(state, false, 12);
+        assert!(state.local_config_diagnostic.is_none());
+        assert!(tab_settings_text(state).contains("Current: single row · Maximum rows: 12"));
+    });
+}
+
+#[test]
+fn tabs_settings_save_failure_does_not_apply_or_queue_reload() {
+    with_tab_settings_config(
+        "[ui]\ntab_bar_wrap = true\ntab_bar_max_rows = 7\n",
+        |state, path| {
+            state.select_settings_section(
+                ClientSettingsSection::Tabs,
+                &mut ClientShellInput::default(),
+            );
+            state.select_settings_choice(0);
+            std::fs::remove_file(path).unwrap();
+            std::fs::create_dir(path).unwrap();
+            let mut outcome = ClientShellInput::default();
+            state.apply_settings_choice(&mut outcome);
+            assert_tab_settings(state, true, 7);
+            assert!(outcome.repaint);
+            assert!(!outcome.resize);
+            assert!(outcome.actions.is_empty());
+            assert!(state.endpoint_error.as_deref().is_some_and(|error| {
+                error.contains("failed to read config before saving tab bar settings")
+            }));
+            assert!(path.is_dir());
+        },
+    );
+}
+
+#[test]
+fn tabs_settings_apply_does_not_bypass_failed_ui_reload() {
+    with_tab_settings_config("", |state, path| {
+        state.select_settings_section(
+            ClientSettingsSection::Tabs,
+            &mut ClientShellInput::default(),
+        );
+        std::fs::write(
+            path,
+            "[ui]\nsidebar_min_width = 100\nsidebar_max_width = 36\n",
+        )
+        .unwrap();
+        state.select_settings_choice(1);
+        state.apply_settings_choice(&mut ClientShellInput::default());
+        assert_tab_settings(state, false, 3);
+        assert!(state.local_config_diagnostic.is_some());
+    });
+}
+
 #[test]
 fn plus_commands_survive_snapshots_and_reload_for_both_keybinding_sources() {
     for source in [

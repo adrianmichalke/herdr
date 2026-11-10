@@ -984,6 +984,8 @@ pub struct UiConfig {
     pub hide_tab_bar_when_single_tab: bool,
     /// Desktop tab row placement. Default: top.
     pub tab_bar_position: TabBarPositionConfig,
+    pub tab_bar_wrap: bool,
+    pub tab_bar_max_rows: u16,
     /// Ordered entries shown at the right edge of the desktop tab row. Empty by default.
     pub tab_bar_right: Vec<TabBarRightEntryConfig>,
     /// Text inserted between visible right-side tab bar entries. Default: one space.
@@ -1220,6 +1222,8 @@ impl Default for UiConfig {
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
             tab_bar_position: TabBarPositionConfig::Top,
+            tab_bar_wrap: false,
+            tab_bar_max_rows: 3,
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: " ".into(),
             window_title: super::window_title::default_window_title(),
@@ -1235,6 +1239,10 @@ impl Default for UiConfig {
 }
 
 impl UiConfig {
+    pub fn tab_bar_max_rows(&self) -> u16 {
+        self.tab_bar_max_rows.max(1)
+    }
+
     pub fn mouse_scroll_lines(&self) -> usize {
         self.mouse_scroll_lines
             .map(NonZeroUsize::get)
@@ -1565,6 +1573,50 @@ tab_bar_right_separator = " · "
             TabBarRightEntryConfig::Hostname
         ));
         assert_eq!(config.ui.tab_bar_right_separator, " · ");
+    }
+
+    #[test]
+    fn tab_bar_wrapping_defaults_to_single_row_with_three_maximum_rows() {
+        let config = Config::default();
+        assert!(!config.ui.tab_bar_wrap);
+        assert_eq!(config.ui.tab_bar_max_rows, 3);
+        assert_eq!(config.ui.tab_bar_max_rows(), 3);
+
+        for source in ["", "[ui]\n"] {
+            let config: Config = toml::from_str(source).unwrap();
+            assert!(!config.ui.tab_bar_wrap);
+            assert_eq!(config.ui.tab_bar_max_rows(), 3);
+        }
+    }
+
+    #[test]
+    fn tab_bar_wrapping_parses_and_normalizes_effective_zero_rows() {
+        for rows in [0, 1, 7, u16::MAX] {
+            let config: Config = toml::from_str(&format!(
+                "[ui]\ntab_bar_wrap = true\ntab_bar_max_rows = {rows}\n"
+            ))
+            .unwrap();
+            assert!(config.ui.tab_bar_wrap);
+            assert_eq!(config.ui.tab_bar_max_rows, rows);
+            assert_eq!(config.ui.tab_bar_max_rows(), rows.max(1));
+        }
+
+        let config: Config =
+            toml::from_str("[ui]\ntab_bar_wrap = false\ntab_bar_max_rows = 7\n").unwrap();
+        assert!(!config.ui.tab_bar_wrap);
+        assert_eq!(config.ui.tab_bar_max_rows(), 7);
+    }
+
+    #[test]
+    fn tab_bar_wrapping_rejects_invalid_types_and_row_ranges() {
+        for source in [
+            "[ui]\ntab_bar_wrap = 1\n",
+            "[ui]\ntab_bar_max_rows = -1\n",
+            "[ui]\ntab_bar_max_rows = 65536\n",
+            "[ui]\ntab_bar_max_rows = '3'\n",
+        ] {
+            assert!(toml::from_str::<Config>(source).is_err(), "{source}");
+        }
     }
 
     #[test]

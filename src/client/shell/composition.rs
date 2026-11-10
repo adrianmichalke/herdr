@@ -22,6 +22,7 @@ fn restore_mode_bar(
 impl ClientShellState {
     fn compose_unavailable(&mut self, cols: u16, rows: u16) -> FrameData {
         let layout = self.layout(cols, rows);
+        let tab_bar_occluded = self.tab_bar_occluded();
         let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
         buffer.set_style(
             buffer.area,
@@ -78,7 +79,7 @@ impl ClientShellState {
             reveal_focused_tab: &mut self.reveal_focused_tab,
             sidebar_collapsed: false,
             sidebar_section_split: self.sidebar_section_split,
-            tab_drag_insert_index: None,
+            tab_bar_occluded,
             selected_workspace_id: self
                 .navigate_workspace_id
                 .as_ref()
@@ -247,12 +248,14 @@ impl ClientShellState {
             return None;
         }
         let layout = self.layout(cols, rows);
-        if self.last_tab_bar_width != Some(layout.tab_bar.width) {
-            self.last_tab_bar_width = Some(layout.tab_bar.width);
+        let tab_bar_occluded = self.tab_bar_occluded();
+        let tab_layout = (layout.tab_bar, self.config.tab_bar_wrap, tab_bar_occluded);
+        if self.last_tab_bar_layout != Some(tab_layout) {
+            self.last_tab_bar_layout = Some(tab_layout);
             self.reveal_focused_tab = true;
         }
-        let tab_drag_insert_index = match &self.chrome_drag {
-            Some(ClientChromeDrag::Tab { insert_index, .. }) => *insert_index,
+        let tab_drag_pointer = match &self.chrome_drag {
+            Some(ClientChromeDrag::Tab { pointer, .. }) => Some(*pointer),
             _ => None,
         };
         let (dragged_workspace_id, workspace_drop_indicator_row) = match &self.chrome_drag {
@@ -285,7 +288,7 @@ impl ClientShellState {
                 reveal_focused_tab: &mut self.reveal_focused_tab,
                 sidebar_collapsed: self.sidebar_collapsed,
                 sidebar_section_split: self.sidebar_section_split,
-                tab_drag_insert_index,
+                tab_bar_occluded,
                 selected_workspace_id: self
                     .navigate_workspace_id
                     .as_ref()
@@ -296,6 +299,25 @@ impl ClientShellState {
                 workspace_drop_indicator_row,
             },
         );
+        if let Some(pointer) = tab_drag_pointer {
+            let insert_index = self.tab_drop_index_at(pointer);
+            if let Some(ClientChromeDrag::Tab {
+                insert_index: current,
+                ..
+            }) = self.chrome_drag.as_mut()
+            {
+                *current = insert_index;
+            }
+            if let Some(insert_index) = insert_index {
+                render::render_tab_drop_indicator(
+                    &mut buffer,
+                    &self.hits,
+                    snapshot,
+                    insert_index,
+                    &self.config.palette,
+                );
+            }
+        }
         self.hits.panes = surface
             .panes
             .iter()
@@ -402,11 +424,22 @@ impl ClientShellState {
                 &mut self.hits,
             );
         }
-        if mode_bar == Some(layout.tab_bar) {
-            self.hits.tabs.clear();
-            self.hits.new_tab = Rect::default();
-            self.hits.tab_scroll_left = Rect::default();
-            self.hits.tab_scroll_right = Rect::default();
+        if let Some(bar) = mode_bar.filter(|bar| bar.intersects(layout.tab_bar)) {
+            self.hits.tabs.retain(|(rect, _)| !rect.intersects(bar));
+            for rect in [
+                &mut self.hits.new_tab,
+                &mut self.hits.tab_scroll_left,
+                &mut self.hits.tab_scroll_right,
+            ] {
+                if rect.intersects(bar) {
+                    *rect = Rect::default();
+                }
+            }
+            self.hits.tab_body.height = self
+                .hits
+                .tab_body
+                .height
+                .min(bar.y.saturating_sub(self.hits.tab_body.y));
         }
         let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[]);
         let compact_selector = (layout.sidebar.is_empty() && layout.mobile_header.is_empty())
@@ -812,6 +845,7 @@ impl ClientShellState {
             self.hits.popup = None;
         }
         let graphics = self.compose_graphics(layout, &occlusion);
+        self.last_composed_pane_surface = Some(layout.pane_surface);
         Some(crate::client::frame_output::ComposedFrame { frame, graphics })
     }
 }

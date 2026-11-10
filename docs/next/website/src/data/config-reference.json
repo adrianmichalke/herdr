@@ -1016,6 +1016,18 @@
           ]
         },
         {
+          "key": "ui.tab_bar_wrap",
+          "type": "boolean",
+          "default": "false",
+          "description": "Wrap desktop tabs onto rows and scroll overflowing rows vertically instead of horizontally."
+        },
+        {
+          "key": "ui.tab_bar_max_rows",
+          "type": "integer",
+          "default": "3",
+          "description": "Maximum wrapped tab rows. Zero is treated as one; small terminals keep usable pane space."
+        },
+        {
           "key": "ui.tab_bar_right",
           "type": "array",
           "default": "[]",

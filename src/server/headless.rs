@@ -2300,7 +2300,9 @@ impl HeadlessServer {
                     return false;
                 }
                 client.request_repaint();
-                self.promote_client_to_foreground(client_id);
+                if client.outer_terminal_focus != Some(false) {
+                    self.promote_client_to_foreground(client_id);
+                }
                 self.resize_shell_tab_if_controller(client_id, true);
                 true
             }

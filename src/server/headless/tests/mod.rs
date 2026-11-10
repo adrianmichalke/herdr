@@ -13,6 +13,7 @@ mod surface_interest_tests;
 #[path = "surface_scroll.rs"]
 mod surface_scroll_tests;
 mod tab_transfer;
+mod tab_wrap_resize;
 
 fn client_shell_projection(
     receiver: &std::sync::mpsc::Receiver<Vec<u8>>,

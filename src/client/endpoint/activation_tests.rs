@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "activation_runtime_tests.rs"]
+mod runtime_geometry;
+
 fn local_session_fixture() -> (
     crate::client::ClientShellState,
     EndpointRegistry,
@@ -444,9 +447,15 @@ fn shell_and_registry() -> TestFixture {
 }
 
 fn shell_and_registry_with_source_failure(source_fail_after_write: bool) -> TestFixture {
-    let mut shell = crate::client::ClientShellState::new(
-        crate::client::ClientShellConfig::from_config(&crate::config::Config::default()),
-    );
+    shell_and_registry_with_config(source_fail_after_write, &crate::config::Config::default())
+}
+
+fn shell_and_registry_with_config(
+    source_fail_after_write: bool,
+    config: &crate::config::Config,
+) -> TestFixture {
+    let mut shell =
+        crate::client::ClientShellState::new(crate::client::ClientShellConfig::from_config(config));
     let profile = super::super::SavedSshEndpoint {
         id: super::super::ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
         label: "Remote".into(),

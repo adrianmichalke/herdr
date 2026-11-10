@@ -82,6 +82,12 @@ fn fast_path_blocker(
         Some("client_surface_patch.fallback.copy_mode")
     } else if state.selection_highlight_clear_deadline.is_some() {
         Some("client_surface_patch.fallback.selection_deadline")
+    } else if state
+        .last_composed_size
+        .zip(state.last_composed_pane_surface)
+        .is_none_or(|((cols, rows), area)| state.layout(cols, rows).pane_surface != area)
+    {
+        Some("client_surface_patch.fallback.geometry")
     } else if patch.panes.iter().any(|pane| {
         !state
             .hits
@@ -174,10 +180,10 @@ impl ClientShellState {
         if let Some(reason) = fast_path_blocker {
             crate::render_prof::event(reason);
         }
-        let fast_path_area = fast_path_blocker.is_none().then(|| {
-            let (cols, rows) = self.last_composed_size.unwrap_or_default();
-            self.layout(cols, rows).pane_surface
-        });
+        let fast_path_area = fast_path_blocker
+            .is_none()
+            .then_some(self.last_composed_pane_surface)
+            .flatten();
         let composed_patch = fast_path_area.map(|area| ClientComposedSurfacePatch {
             rows: patch
                 .rows

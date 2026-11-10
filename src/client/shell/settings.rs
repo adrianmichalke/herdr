@@ -38,6 +38,8 @@ impl ClientShellState {
             selected: theme_index(&self.config.theme_name),
             original_theme_name: self.config.theme_name.clone(),
             original_palette: self.config.palette.clone(),
+            tab_bar_wrap: self.config.tab_bar_wrap,
+            tab_bar_max_rows: self.config.tab_bar_max_rows,
             integrations: Vec::new(),
             integration_messages: Vec::new(),
             loading_integrations: false,
@@ -51,6 +53,7 @@ impl ClientShellState {
             ClientSettingsSection::Indicators => indicator_index(self.config.status_indicators),
             ClientSettingsSection::Sound => usize::from(!self.config.sound_enabled),
             ClientSettingsSection::Toast => toast_index(self.config.toast_delivery),
+            ClientSettingsSection::Tabs => usize::from(self.config.tab_bar_wrap),
             ClientSettingsSection::Integrations => 0,
         }
     }
@@ -73,6 +76,8 @@ impl ClientShellState {
         if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
             settings.section = section;
             settings.selected = selected;
+            settings.tab_bar_wrap = self.config.tab_bar_wrap;
+            settings.tab_bar_max_rows = self.config.tab_bar_max_rows;
         }
         if request_integrations {
             self.queue_integration_list(outcome, true);
@@ -98,7 +103,7 @@ impl ClientShellState {
             Some(ClientShellOverlay::Settings(settings)) => match settings.section {
                 ClientSettingsSection::Theme => crate::config::THEME_NAMES.len(),
                 ClientSettingsSection::Indicators | ClientSettingsSection::Sound => 2,
-                ClientSettingsSection::Toast => 4,
+                ClientSettingsSection::Toast | ClientSettingsSection::Tabs => 4,
                 ClientSettingsSection::Integrations => settings.integrations.len(),
             },
             _ => 0,
@@ -221,6 +226,35 @@ impl ClientShellState {
                     crate::config::ConfigEdit::ToastDelivery(delivery),
                     outcome,
                 );
+            }
+            ClientSettingsSection::Tabs => {
+                let wrap = match selected {
+                    0 => false,
+                    1 => true,
+                    2 | 3 => self.config.tab_bar_wrap,
+                    _ => return,
+                };
+                let max_rows = match selected {
+                    2 => self.config.tab_bar_max_rows.saturating_sub(1).max(1),
+                    3 => self.config.tab_bar_max_rows.saturating_add(1),
+                    _ => self.config.tab_bar_max_rows,
+                };
+                let previous_size = self
+                    .last_composed_size
+                    .map(|(cols, rows)| self.surface_size(cols, rows));
+                if self.save_settings_edit(
+                    crate::config::ConfigEdit::TabBar { wrap, max_rows },
+                    outcome,
+                ) {
+                    if self
+                        .last_composed_size
+                        .map(|(cols, rows)| self.surface_size(cols, rows))
+                        != previous_size
+                    {
+                        self.invalidate_pane_surface();
+                    }
+                    outcome.resize = true;
+                }
             }
             ClientSettingsSection::Integrations => self.install_recommended_integrations(outcome),
         }

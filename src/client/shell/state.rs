@@ -20,6 +20,8 @@ pub(crate) struct ClientShellConfig {
     pub(super) sidebar_collapsed_mode: SidebarCollapsedModeConfig,
     pub(super) mobile_width_threshold: u16,
     pub(super) tab_bar_position: TabBarPositionConfig,
+    pub(super) tab_bar_wrap: bool,
+    pub(super) tab_bar_max_rows: u16,
     pub(super) hide_tab_bar_when_single_tab: bool,
     pub(super) spaces: SpacesSidebarConfig,
     pub(super) agents: crate::config::AgentsSidebarConfig,
@@ -110,6 +112,8 @@ pub(super) struct ShellHitMap {
     pub(super) new_tab: Rect,
     pub(super) tab_scroll_left: Rect,
     pub(super) tab_scroll_right: Rect,
+    pub(super) tab_body: Rect,
+    pub(super) tab_max_scroll: usize,
     pub(super) mobile_switch: Rect,
     pub(super) mobile_close: Rect,
     pub(super) mobile_targets: Vec<(Rect, ClientMobileTarget)>,
@@ -215,6 +219,7 @@ pub(super) enum ClientChromeDrag {
         tab_id: String,
         workspace_id: String,
         insert_index: Option<usize>,
+        pointer: (u16, u16),
     },
     Workspace {
         source_workspace_id: String,
@@ -411,6 +416,7 @@ pub(super) enum ClientSettingsSection {
     Indicators,
     Sound,
     Toast,
+    Tabs,
     Integrations,
 }
 
@@ -420,6 +426,7 @@ impl ClientSettingsSection {
         Self::Indicators,
         Self::Sound,
         Self::Toast,
+        Self::Tabs,
         Self::Integrations,
     ];
 
@@ -429,6 +436,7 @@ impl ClientSettingsSection {
             Self::Indicators => "indicators",
             Self::Sound => "sound",
             Self::Toast => "toasts",
+            Self::Tabs => "tabs",
             Self::Integrations => "integrations",
         }
     }
@@ -440,6 +448,8 @@ pub(super) struct ClientSettingsOverlay {
     pub(super) selected: usize,
     pub(super) original_theme_name: String,
     pub(super) original_palette: Palette,
+    pub(super) tab_bar_wrap: bool,
+    pub(super) tab_bar_max_rows: u16,
     pub(super) integrations: Vec<crate::api::schema::IntegrationInfo>,
     pub(super) integration_messages: Vec<String>,
     pub(super) loading_integrations: bool,
@@ -935,7 +945,9 @@ pub(crate) struct ClientShellState {
     pub(super) reveal_mobile_workspace: bool,
     pub(super) mobile_switcher_suspended: bool,
     pub(super) reveal_focused_tab: bool,
-    pub(super) last_tab_bar_width: Option<u16>,
+    pub(super) last_tab_bar_layout: Option<(Rect, bool, bool)>,
+    pub(super) last_composed_pane_surface: Option<Rect>,
+    pub(super) expected_pane_surface_size: Option<ClientSurfaceSize>,
     pub(super) last_composed_size: Option<(u16, u16)>,
     pub(super) last_composed_at: Option<std::time::Instant>,
     pub(super) selection_repaint_deadline: Option<std::time::Instant>,
@@ -1122,7 +1134,9 @@ impl ClientShellState {
             reveal_mobile_workspace: false,
             mobile_switcher_suspended: false,
             reveal_focused_tab: true,
-            last_tab_bar_width: None,
+            last_tab_bar_layout: None,
+            last_composed_pane_surface: None,
+            expected_pane_surface_size: None,
             last_composed_size: None,
             last_composed_at: None,
             selection_repaint_deadline: None,
@@ -1278,14 +1292,52 @@ impl ClientShellState {
         }
     }
 
+    pub(super) fn tab_bar_occluded(&self) -> bool {
+        self.config.tab_bar_wrap
+            && self.config.tab_bar_position == TabBarPositionConfig::Bottom
+            && self.overlay.is_none()
+            && (self.mode != ClientShellMode::Terminal || self.endpoint_error.is_some())
+    }
+
     pub(super) fn layout(&self, cols: u16, rows: u16) -> ClientShellLayout {
-        self.config.layout(
+        let mut layout = self.config.layout(
             cols,
             rows,
             self.sidebar_collapsed,
             self.focused_tab_count(),
             self.sidebar_width,
-        )
+        );
+        if self.config.tab_bar_wrap && !layout.tab_bar.is_empty() {
+            if let Some(snapshot) = self.snapshot.as_deref() {
+                let width = if layout.sidebar.is_empty() {
+                    layout
+                        .tab_bar
+                        .width
+                        .saturating_sub(render::compact_selector_width(layout.tab_bar.width))
+                } else {
+                    layout.tab_bar.width
+                };
+                let max_height = self
+                    .config
+                    .tab_bar_max_rows
+                    .max(1)
+                    .min(rows.saturating_sub(crate::pane::MIN_PANE_ROWS).max(1));
+                let height =
+                    render::wrapped_tab_bar_height(snapshot, &self.config, width, max_height);
+                let extra = height.saturating_sub(layout.tab_bar.height);
+                layout.tab_bar.height = height;
+                layout.pane_surface.height = layout.pane_surface.height.saturating_sub(extra);
+                match self.config.tab_bar_position {
+                    TabBarPositionConfig::Top => {
+                        layout.pane_surface.y = layout.pane_surface.y.saturating_add(extra)
+                    }
+                    TabBarPositionConfig::Bottom => {
+                        layout.tab_bar.y = layout.tab_bar.y.saturating_sub(extra)
+                    }
+                }
+            }
+        }
+        layout
     }
 
     pub(crate) fn surface_size(&self, cols: u16, rows: u16) -> ClientSurfaceSize {
@@ -1313,7 +1365,9 @@ impl ClientShellState {
         self.reveal_mobile_workspace = false;
         self.mobile_switcher_suspended = false;
         self.reveal_focused_tab = true;
-        self.last_tab_bar_width = None;
+        self.last_tab_bar_layout = None;
+        self.last_composed_pane_surface = None;
+        self.expected_pane_surface_size = None;
         self.last_composed_size = None;
         self.last_composed_at = None;
         self.selection_repaint_deadline = None;
@@ -1720,6 +1774,11 @@ impl ClientShellState {
     }
 
     fn install_pane_surface(&mut self, mut surface: PaneSurfaceFrame, retain_future: bool) {
+        if self.expected_pane_surface_size.is_some_and(|size| {
+            surface.frame.width != size.cols || surface.frame.height != size.rows
+        }) {
+            return;
+        }
         let Some(snapshot) = self.snapshot.as_ref() else {
             return;
         };
@@ -1974,7 +2033,21 @@ impl ClientShellState {
             .unwrap_or(default)
     }
 
+    pub(crate) fn expect_pane_surface_size(&mut self, size: ClientSurfaceSize) {
+        if self.expected_pane_surface_size != Some(size) {
+            self.last_composed_pane_surface = None;
+            self.hits = ShellHitMap::default();
+        }
+        self.expected_pane_surface_size = Some(size);
+        if self.pane_surface.as_ref().is_some_and(|surface| {
+            surface.frame.width != size.cols || surface.frame.height != size.rows
+        }) {
+            self.invalidate_pane_surface();
+        }
+    }
+
     pub(crate) fn invalidate_pane_surface(&mut self) {
+        self.last_composed_pane_surface = None;
         self.pane_surface = None;
         self.pending_pane_surface = None;
         self.hits = ShellHitMap::default();

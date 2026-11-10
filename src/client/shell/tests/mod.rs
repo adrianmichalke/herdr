@@ -6,6 +6,8 @@ use crate::protocol::{
 };
 use crossterm::event::MouseEvent;
 mod text_editing;
+mod wrapped_surface;
+mod wrapped_tabs;
 
 pub(in crate::client) fn snapshot() -> ClientShellSnapshot {
     ClientShellSnapshot {

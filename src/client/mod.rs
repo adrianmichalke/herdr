@@ -1381,7 +1381,7 @@ async fn run_client_loop(
                     shell.set_graphics_cell_size(cell_width_px, cell_height_px);
                     shell.invalidate_pane_surface();
                 }
-                let msg = if let Some(shell) = &state.shell {
+                let msg = if let Some(shell) = &mut state.shell {
                     client_shell_resize_message(
                         shell,
                         new_cols,

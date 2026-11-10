@@ -194,6 +194,33 @@ pub(super) fn render_settings_overlay(
                 &mut choice_hits,
             );
         }
+        ClientSettingsSection::Tabs => {
+            let max_rows = settings.tab_bar_max_rows;
+            let mode = if settings.tab_bar_wrap {
+                "wrapped rows"
+            } else {
+                "single row"
+            };
+            let description = format!("Current: {mode} · Maximum rows: {max_rows}");
+            let decrease = format!(
+                "Decrease maximum rows ({max_rows} → {})",
+                max_rows.saturating_sub(1).max(1)
+            );
+            let increase = format!(
+                "Increase maximum rows ({max_rows} → {})",
+                max_rows.saturating_add(1)
+            );
+            render_choice_section(
+                buffer,
+                content,
+                "tab bar",
+                &description,
+                &["Single row", "Wrapped rows", &decrease, &increase],
+                settings.selected,
+                palette,
+                &mut choice_hits,
+            );
+        }
         ClientSettingsSection::Integrations => {
             render_integrations(buffer, content, settings, palette);
         }

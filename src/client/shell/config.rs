@@ -103,6 +103,10 @@ impl ClientShellState {
                 self.set_local_config_diagnostic(self.config.local_config_diagnostic(&diagnostics));
             }
         }
+        if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+            settings.tab_bar_wrap = self.config.tab_bar_wrap;
+            settings.tab_bar_max_rows = self.config.tab_bar_max_rows;
+        }
         self.reconcile_input_source();
     }
 }
@@ -118,6 +122,8 @@ impl ClientShellConfig {
             sidebar_collapsed_mode: config.ui.sidebar_collapsed_mode,
             mobile_width_threshold: config.ui.mobile_width_threshold,
             tab_bar_position: config.ui.tab_bar_position,
+            tab_bar_wrap: config.ui.tab_bar_wrap,
+            tab_bar_max_rows: config.ui.tab_bar_max_rows(),
             hide_tab_bar_when_single_tab: config.ui.hide_tab_bar_when_single_tab,
             spaces: config.ui.sidebar.spaces.clone(),
             agents: config.ui.sidebar.agents.clone(),
@@ -352,6 +358,8 @@ impl ClientShellConfig {
                 self.sidebar_collapsed_mode = ui.sidebar_collapsed_mode;
                 self.mobile_width_threshold = ui.mobile_width_threshold;
                 self.tab_bar_position = ui.tab_bar_position;
+                self.tab_bar_wrap = ui.tab_bar_wrap;
+                self.tab_bar_max_rows = ui.tab_bar_max_rows();
                 self.hide_tab_bar_when_single_tab = ui.hide_tab_bar_when_single_tab;
                 self.spaces = ui.sidebar.spaces.clone();
                 self.agents = ui.sidebar.agents.clone();

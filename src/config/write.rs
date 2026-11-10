@@ -4,6 +4,7 @@ pub(crate) enum ConfigEdit<'a> {
     StatusIndicators(super::StatusIndicatorStyle),
     Sound(bool),
     ToastDelivery(super::ToastDelivery),
+    TabBar { wrap: bool, max_rows: u16 },
 }
 
 impl ConfigEdit<'_> {
@@ -13,6 +14,7 @@ impl ConfigEdit<'_> {
             Self::StatusIndicators(_) => "status indicators",
             Self::Sound(_) => "sound setting",
             Self::ToastDelivery(_) => "toast setting",
+            Self::TabBar { .. } => "tab bar settings",
         }
     }
 
@@ -31,6 +33,15 @@ impl ConfigEdit<'_> {
             ),
             Self::Sound(enabled) => {
                 super::upsert_section_bool(content, "ui.sound", "enabled", enabled)
+            }
+            Self::TabBar { wrap, max_rows } => {
+                let content = super::upsert_section_bool(content, "ui", "tab_bar_wrap", wrap);
+                super::upsert_section_value(
+                    &content,
+                    "ui",
+                    "tab_bar_max_rows",
+                    &max_rows.max(1).to_string(),
+                )
             }
             Self::ToastDelivery(delivery) => {
                 let value = match delivery {
@@ -77,6 +88,63 @@ pub(crate) fn write_edit(edit: ConfigEdit<'_>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_bar_edit_preserves_other_settings_and_is_idempotent() {
+        let content = r#"onboarding = false
+
+[theme]
+name = "nord"
+
+[ui]
+# custom sidebar width
+sidebar_width = 31
+tab_bar_position = "bottom"
+tab_bar_wrap = false
+tab_bar_max_rows = 7
+tab_bar_right = [{ type = "text", text = "prod" }]
+
+[ui.sound]
+enabled = false
+
+[keys]
+prefix = "ctrl+a"
+"#;
+        let edit = ConfigEdit::TabBar {
+            wrap: true,
+            max_rows: 5,
+        };
+        let updated = edit.apply(content);
+        let mut expected: toml::Value = toml::from_str(content).unwrap();
+        expected["ui"]["tab_bar_wrap"] = toml::Value::Boolean(true);
+        expected["ui"]["tab_bar_max_rows"] = toml::Value::Integer(5);
+
+        assert_eq!(toml::from_str::<toml::Value>(&updated).unwrap(), expected);
+        assert!(updated.contains("# custom sidebar width\nsidebar_width = 31"));
+        assert_eq!(updated.matches("tab_bar_wrap =").count(), 1);
+        assert_eq!(updated.matches("tab_bar_max_rows =").count(), 1);
+        assert_eq!(edit.apply(&updated), updated);
+    }
+
+    #[test]
+    fn tab_bar_edit_adds_missing_keys_and_normalizes_zero() {
+        for content in [
+            "",
+            "[theme]\nname = 'nord'\n",
+            "[ui]\nsidebar_width = 31\n",
+            "[ui.sound]\nenabled = false\n",
+        ] {
+            let edit = ConfigEdit::TabBar {
+                wrap: false,
+                max_rows: 0,
+            };
+            let updated = edit.apply(content);
+            let config: super::super::Config = toml::from_str(&updated).unwrap();
+            assert!(!config.ui.tab_bar_wrap);
+            assert_eq!(config.ui.tab_bar_max_rows, 1);
+            assert_eq!(edit.apply(&updated), updated);
+        }
+    }
 
     #[test]
     fn update_file_at_does_not_move_a_leading_bom_into_the_file() {

@@ -450,7 +450,7 @@ impl ClientShellState {
         ((pointer + grab_offset - origin) as f32 / f32::from(length.max(1))).clamp(0.1, 0.9)
     }
 
-    fn tab_drop_index_at(&self, point: (u16, u16)) -> Option<usize> {
+    pub(super) fn tab_drop_index_at(&self, point: (u16, u16)) -> Option<usize> {
         let snapshot = self.snapshot.as_deref()?;
         let workspace_id = snapshot.focused_workspace_id.as_deref()?;
         let tabs = snapshot
@@ -470,6 +470,33 @@ impl ClientShellState {
             .collect::<Vec<_>>();
         let (first_index, first_rect) = *visible.first()?;
         let (last_index, last_rect) = *visible.last()?;
+        if self.config.tab_bar_wrap && !self.hits.tab_body.is_empty() {
+            if super::contains(self.hits.tab_scroll_left, point) {
+                return Some(0);
+            }
+            if super::contains(self.hits.tab_scroll_right, point) {
+                return Some(tabs.len());
+            }
+            if !super::contains(self.hits.tab_body, point) {
+                return None;
+            }
+            let mut row = visible
+                .iter()
+                .filter(|(_, rect)| rect.y == point.1)
+                .peekable();
+            let &(first, _) = *row.peek()?;
+            let mut after = first;
+            for &(index, rect) in row {
+                if point.0 < rect.x.saturating_add(rect.width / 2) {
+                    return Some(index);
+                }
+                if point.0 < rect.right() {
+                    return Some(index + 1);
+                }
+                after = index + 1;
+            }
+            return Some(after);
+        }
         let on_tab_row = point.1 == first_rect.y;
         if !on_tab_row {
             return None;
@@ -1266,9 +1293,11 @@ impl ClientShellState {
                     let insert_index = self.tab_drop_index_at(point);
                     if let Some(ClientChromeDrag::Tab {
                         insert_index: current,
+                        pointer,
                         ..
                     }) = self.chrome_drag.as_mut()
                     {
+                        *pointer = point;
                         *current = insert_index;
                     }
                     outcome.repaint = true;
@@ -1318,6 +1347,7 @@ impl ClientShellState {
                             tab_id: press.tab_id.clone(),
                             workspace_id: press.workspace_id.clone(),
                             insert_index: Some(insert_index),
+                            pointer: point,
                         });
                         outcome.repaint = true;
                     }
@@ -1581,7 +1611,8 @@ impl ClientShellState {
                         Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
                             section: ClientSettingsSection::Indicators
                                 | ClientSettingsSection::Sound
-                                | ClientSettingsSection::Toast,
+                                | ClientSettingsSection::Toast
+                                | ClientSettingsSection::Tabs,
                             ..
                         }))
                     );
@@ -1936,8 +1967,17 @@ impl ClientShellState {
                     .any(|(rect, _)| super::contains(*rect, point))
                     || super::contains(self.hits.tab_scroll_left, point)
                     || super::contains(self.hits.tab_scroll_right, point)
-                    || super::contains(self.hits.new_tab, point) =>
+                    || super::contains(self.hits.new_tab, point)
+                    || super::contains(self.hits.tab_body, point) =>
             {
+                if self.config.tab_bar_wrap {
+                    self.tab_scroll = self.tab_scroll.saturating_sub(1);
+                    if let Some(ClientChromeDrag::Tab { pointer, .. }) = self.chrome_drag.as_mut() {
+                        *pointer = point;
+                    }
+                    outcome.repaint = true;
+                    return;
+                }
                 self.record_binding(
                     crate::input::KeybindMatch::Action(crate::input::KeybindAction::PreviousTab),
                     outcome,
@@ -1951,8 +1991,20 @@ impl ClientShellState {
                     .any(|(rect, _)| super::contains(*rect, point))
                     || super::contains(self.hits.tab_scroll_left, point)
                     || super::contains(self.hits.tab_scroll_right, point)
-                    || super::contains(self.hits.new_tab, point) =>
+                    || super::contains(self.hits.new_tab, point)
+                    || super::contains(self.hits.tab_body, point) =>
             {
+                if self.config.tab_bar_wrap {
+                    self.tab_scroll = self
+                        .tab_scroll
+                        .saturating_add(1)
+                        .min(self.hits.tab_max_scroll);
+                    if let Some(ClientChromeDrag::Tab { pointer, .. }) = self.chrome_drag.as_mut() {
+                        *pointer = point;
+                    }
+                    outcome.repaint = true;
+                    return;
+                }
                 self.record_binding(
                     crate::input::KeybindMatch::Action(crate::input::KeybindAction::NextTab),
                     outcome,
@@ -2131,6 +2183,14 @@ impl ClientShellState {
                     return;
                 }
                 if super::contains(self.hits.tab_scroll_right, point) {
+                    if self.config.tab_bar_wrap {
+                        self.tab_scroll = self
+                            .tab_scroll
+                            .saturating_add(1)
+                            .min(self.hits.tab_max_scroll);
+                        outcome.repaint = true;
+                        return;
+                    }
                     let tab_count = self
                         .snapshot
                         .as_deref()
