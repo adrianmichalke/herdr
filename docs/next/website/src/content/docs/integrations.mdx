@@ -114,6 +114,25 @@ Herdr writes the bundled extension to:
 
 If `PI_CODING_AGENT_DIR` is set, Herdr writes to `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts` instead. Herdr creates the extensions directory when the Pi agent directory already exists. Uninstall removes only that extension file.
 
+### Global Discord notification preference
+
+This fork provides an opt-in companion for an existing Pi `discord-notify.ts` extension. It changes only preference handling; it does not create a second notification sender or change the configured webhook, automatic `agent_end` event, `/discord`, `/discord-notify test`, or `discord_send` behavior. It also works in Pi sessions outside Herdr.
+
+From a checkout of this fork:
+
+```bash
+python3 scripts/install_pi_discord_preference.py --check
+python3 scripts/install_pi_discord_preference.py
+```
+
+The installer uses `PI_CODING_AGENT_DIR`, falling back to `~/.pi/agent`. Use `--agent-dir <path>` for another configuration or `--extension <path>` for an explicitly located extension. It follows symlinked extension directories, validates the supported legacy preference code, and refuses unrecognized state implementations rather than replacing custom code. It leaves webhook and send-function bytes intact. A private original backup and two companion modules are stored beside the extension in `.herdr-pi-preferences/`; that directory is not a separately auto-loaded extension. The backup may contain credentials: keep it private and do not commit or share it. An incomplete or stale existing backup is rejected rather than silently reused; inspect that private backup before retrying. Installer processes are serialized, and the source is checked again immediately before publication to catch concurrent edits. The installer never reads or rewrites conversations and never changes the current preference.
+
+Reload extensions once in existing Pi sessions when they are idle. After that, `/discord-notify on`, `off`, `toggle`, and `status` use the same user-level `preferences/discord-notify.json` file, independent of projects, branches, forks, resumes, and Herdr sessions. When no preference exists, automatic notifications are disabled; historical session entries are ignored, not migrated into an implicit opt-in.
+
+Commands and automatic-notification gates reread the file immediately. Other running sessions refresh their footer indicator within one second, without restarting or interrupting work. The indicator identifies the global value as `discord:global:on` or `discord:global:off`; an unavailable or invalid file is shown as `discord:global:off!` and fails closed. Explicit commands can repair invalid values when the file is writable. Writes atomically publish a complete private file; simultaneous settings commands use last-writer-wins semantics. Independent preferences use separate files so they cannot overwrite one another.
+
+Loading or changing the preference never sends a ready/test notification. Manual sends and explicit notification tests still work while automatic notifications are off. No webhook credential is stored in the preference file or copied into this repository. The generic boolean storage is reusable by other Pi preferences; this integration does not change `/fast` or model/request settings.
+
 ## OMP
 
 Install the OMP integration:

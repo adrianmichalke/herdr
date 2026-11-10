@@ -128,6 +128,10 @@ integration-assets-test:
     bun test src/integration/assets/opencode/herdr-agent-state.test.ts
     bun test src/integration/assets/opencode/herdr-tui-session.test.ts
     just vim-integration-test
+    just pi-discord-preference-test
+
+pi-discord-preference-test:
+    {{python}} -m unittest scripts.test_pi_discord_preference_installer
 
 vim-integration-test:
     {{python}} -m unittest scripts.test_vim_integration_asset
