@@ -488,6 +488,44 @@ impl App {
         )
     }
 
+    pub(crate) fn pane_focus_session_is_current(
+        &self,
+        params: &crate::api::schema::PaneFocusIfSessionParams,
+    ) -> bool {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return false;
+        };
+        let Some(pane) = self.state.workspaces[ws_idx].pane_state(pane_id) else {
+            return false;
+        };
+        let Some(terminal) = self.state.terminals.get(&pane.attached_terminal_id) else {
+            return false;
+        };
+        terminal.id.as_str() == params.terminal_id
+            && super::super::creation::terminal_agent_session_info(terminal).as_ref()
+                == Some(&params.agent_session)
+    }
+
+    pub(super) fn handle_pane_focus_if_session(
+        &mut self,
+        id: String,
+        params: crate::api::schema::PaneFocusIfSessionParams,
+    ) -> String {
+        if !self.pane_focus_session_is_current(&params) {
+            return encode_error(
+                id,
+                "stale_agent_session",
+                "pane or native agent session changed",
+            );
+        }
+        self.handle_pane_focus(
+            id,
+            PaneTarget {
+                pane_id: params.pane_id,
+            },
+        )
+    }
+
     pub(super) fn handle_pane_focus(&mut self, id: String, target: PaneTarget) -> String {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
             return pane_not_found(id, &target.pane_id);

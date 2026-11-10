@@ -241,78 +241,92 @@ impl ClientShellConfig {
         profile: Option<&str>,
         commands: &[crate::protocol::ClientShellCommand],
     ) -> Result<(), String> {
-        let mut keybinds = match self.keybinding_source {
-            ClientShellKeybindingSource::Endpoint => crate::config::keybindings_from_profile_toml(
-                profile.ok_or("endpoint did not publish its keybindings")?,
-            )?,
-            ClientShellKeybindingSource::RemoteLocal => return Ok(()),
-            ClientShellKeybindingSource::Local => {
-                let mut config = crate::config::Config {
-                    keys: self.local_keys.clone(),
-                    ..Default::default()
-                };
-                config.keys.command = commands
-                    .iter()
-                    .filter_map(|command| {
-                        let action_type = match command.action {
-                            crate::protocol::ClientShellCommandAction::Shell => {
-                                crate::config::CommandKeybindType::Shell
-                            }
-                            crate::protocol::ClientShellCommandAction::Pane => {
-                                crate::config::CommandKeybindType::Pane
-                            }
-                            crate::protocol::ClientShellCommandAction::Popup => {
-                                crate::config::CommandKeybindType::Popup
-                            }
-                            crate::protocol::ClientShellCommandAction::PluginAction => {
-                                crate::config::CommandKeybindType::PluginAction
-                            }
-                            crate::protocol::ClientShellCommandAction::Unknown => return None,
-                        };
-                        Some(crate::config::CommandKeybindConfig {
-                            key: if command.binding_labels.len() == 1 {
-                                crate::config::BindingConfig::One(command.binding_labels[0].clone())
-                            } else {
-                                crate::config::BindingConfig::Many(command.binding_labels.clone())
-                            },
-                            // The client never executes this field; preserve the opaque endpoint ID
-                            // through the shared config collision resolver.
+        let mut config = match self.keybinding_source {
+            ClientShellKeybindingSource::Endpoint => {
+                let config = toml::from_str::<Config>(
+                    profile.ok_or("endpoint did not publish its keybindings")?,
+                )
+                .map_err(|error| format!("invalid keybinding profile: {error}"))?;
+                let history_default = !config.keys.key_field_is_user_configured("history_search");
+                let mut keybinds = config
+                    .live_keybinds_with_diagnostics()
+                    .map(|(keybinds, _diagnostics)| keybinds)
+                    .map_err(|diagnostics| diagnostics.join("; "))?;
+                for command in commands {
+                    let Ok(action) = command.action.try_into() else {
+                        continue;
+                    };
+                    let bindings =
+                        crate::config::ActionKeybinds::from_labels(&command.binding_labels)?;
+                    if history_default {
+                        keybinds.keybinds.history_search.bindings.retain(|history| {
+                            !bindings.bindings.iter().any(|command| {
+                                command.trigger.is_direct() == history.trigger.is_direct()
+                                    && crate::config::normalize_key_combo(command.trigger.combo())
+                                        == crate::config::normalize_key_combo(
+                                            history.trigger.combo(),
+                                        )
+                            })
+                        });
+                    }
+                    keybinds
+                        .keybinds
+                        .custom_commands
+                        .push(crate::config::CustomCommandKeybind {
+                            bindings,
+                            label: command.binding_label.clone(),
                             command: command.command_id.clone(),
-                            action_type,
+                            action,
                             description: command.description.clone(),
                             width: None,
                             height: None,
-                        })
-                    })
-                    .collect();
-                config
-                    .live_keybinds_with_diagnostics()
-                    .map(|(keybinds, _diagnostics)| keybinds)
-                    .map_err(|diagnostics| diagnostics.join("; "))?
+                        });
+                }
+                self.keybinds = keybinds;
+                return Ok(());
             }
+            ClientShellKeybindingSource::RemoteLocal => return Ok(()),
+            ClientShellKeybindingSource::Local => Config {
+                keys: self.local_keys.clone(),
+                ..Default::default()
+            },
         };
-        if self.keybinding_source == ClientShellKeybindingSource::Endpoint {
-            for command in commands {
-                let Ok(action) = command.action.try_into() else {
-                    continue;
+        config.keys.command = commands
+            .iter()
+            .filter_map(|command| {
+                let action_type = match command.action {
+                    crate::protocol::ClientShellCommandAction::Shell => {
+                        crate::config::CommandKeybindType::Shell
+                    }
+                    crate::protocol::ClientShellCommandAction::Pane => {
+                        crate::config::CommandKeybindType::Pane
+                    }
+                    crate::protocol::ClientShellCommandAction::Popup => {
+                        crate::config::CommandKeybindType::Popup
+                    }
+                    crate::protocol::ClientShellCommandAction::PluginAction => {
+                        crate::config::CommandKeybindType::PluginAction
+                    }
+                    crate::protocol::ClientShellCommandAction::Unknown => return None,
                 };
-                keybinds
-                    .keybinds
-                    .custom_commands
-                    .push(crate::config::CustomCommandKeybind {
-                        bindings: crate::config::ActionKeybinds::from_labels(
-                            &command.binding_labels,
-                        )?,
-                        label: command.binding_label.clone(),
-                        command: command.command_id.clone(),
-                        action,
-                        description: command.description.clone(),
-                        width: None,
-                        height: None,
-                    });
-            }
-        }
-        self.keybinds = keybinds;
+                Some(crate::config::CommandKeybindConfig {
+                    key: if command.binding_labels.len() == 1 {
+                        crate::config::BindingConfig::One(command.binding_labels[0].clone())
+                    } else {
+                        crate::config::BindingConfig::Many(command.binding_labels.clone())
+                    },
+                    command: command.command_id.clone(),
+                    action_type,
+                    description: command.description.clone(),
+                    width: None,
+                    height: None,
+                })
+            })
+            .collect();
+        self.keybinds = config
+            .live_keybinds_with_diagnostics()
+            .map(|(keybinds, _diagnostics)| keybinds)
+            .map_err(|diagnostics| diagnostics.join("; "))?;
         Ok(())
     }
 

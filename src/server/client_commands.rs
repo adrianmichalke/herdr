@@ -245,6 +245,10 @@ mod tests {
         )))
         .expect("endpoint method shape fixture");
         let mut actual = endpoint_method_shape_digests();
+        assert_eq!(
+            actual.remove("pane.focus_if_session").as_deref(),
+            Some("38ff48f19cbb1f69ab310c80adc9b885b85a0a51df66d011795a266395d2d33f")
+        );
         assert!(actual.remove("tab.move_to_workspace").is_some());
         let mut tab_transfer = serde_json::to_value(schemars::schema_for!(
             crate::api::schema::TabMoveToWorkspaceParams

@@ -2967,6 +2967,15 @@ impl HeadlessServer {
             return false;
         }
 
+        if matches!(
+            msg.request.method,
+            api::schema::Method::SessionHistorySnapshot(_)
+        ) {
+            let response = self.app.handle_session_history_snapshot(msg.request.id);
+            let _ = msg.respond_to.send(response);
+            return false;
+        }
+
         let route = serde_json::to_string(&msg.request)
             .map_err(io::Error::other)
             .and_then(|line| {
@@ -3088,7 +3097,11 @@ impl HeadlessServer {
             }
         };
 
-        let metadata_expired = self.app.expire_due_metadata(Instant::now());
+        let conditional_focus = matches!(
+            msg.request.method,
+            api::schema::Method::PaneFocusIfSession(_)
+        );
+        let metadata_expired = !conditional_focus && self.app.expire_due_metadata(Instant::now());
         if let api::schema::Method::ServerLiveHandoff(params) = &msg.request.method {
             let handoff_result = self.perform_live_handoff(params.clone());
             let handoff_succeeded = handoff_result.is_ok();
@@ -3144,7 +3157,9 @@ impl HeadlessServer {
                 &msg.request.method,
                 api::schema::Method::ServerStop(_) | api::schema::Method::ServerLiveHandoff(_)
             );
-        changed |= self.drain_all_internal_events_with_forwarding();
+        if !conditional_focus {
+            changed |= self.drain_all_internal_events_with_forwarding();
+        }
         if self.host_shutdown_requested() {
             Self::reject_api_request_for_shutdown(msg);
             return changed;

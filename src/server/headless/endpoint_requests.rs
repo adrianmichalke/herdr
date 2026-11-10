@@ -80,6 +80,23 @@ impl HeadlessServer {
             return false;
         }
 
+        let pending_changed =
+            if matches!(request.method, api::schema::Method::PaneFocusIfSession(_)) {
+                if self.shutting_down || self.host_shutdown_requested() {
+                    let message = crate::server::client_commands::error_message(
+                        boot_id,
+                        request_id,
+                        "server_unavailable",
+                        "server is shutting down",
+                    );
+                    self.send_to_client(client_id, message);
+                    return false;
+                }
+                self.drain_all_internal_events_with_forwarding()
+                    | self.app.expire_due_metadata(Instant::now())
+            } else {
+                false
+            };
         if self.client_request_is_transfer_fenced(client_id, &request) {
             let message = crate::server::client_commands::error_message(
                 boot_id,
@@ -88,7 +105,30 @@ impl HeadlessServer {
                 "workspace is being transferred; retry after the move completes",
             );
             self.send_to_client(client_id, message);
-            return false;
+            return pending_changed;
+        }
+
+        if let api::schema::Method::PaneFocusIfSession(params) = &request.method {
+            if self.shutting_down || self.host_shutdown_requested() {
+                let message = crate::server::client_commands::error_message(
+                    boot_id,
+                    request_id,
+                    "server_unavailable",
+                    "server is shutting down",
+                );
+                self.send_to_client(client_id, message);
+                return pending_changed;
+            }
+            if !self.app.pane_focus_session_is_current(params) {
+                let message = crate::server::client_commands::error_message(
+                    boot_id,
+                    request_id,
+                    "stale_agent_session",
+                    "pane or native agent session changed",
+                );
+                self.send_to_client(client_id, message);
+                return pending_changed;
+            }
         }
 
         let api_request_id = format!(
@@ -111,7 +151,7 @@ impl HeadlessServer {
                 format!("failed to start endpoint response bridge: {err}"),
             );
             self.send_to_client(client_id, message);
-            return false;
+            return pending_changed;
         }
         if let Some(client) = self.clients.get_mut(&client_id) {
             client.shell_endpoint_command_in_flight = true;
@@ -135,8 +175,9 @@ impl HeadlessServer {
             client.shell_deferred_navigation_response = deferred_navigation.then(Vec::new);
         }
         let foreground_changed = !transfer_status && self.promote_client_to_foreground(client_id);
-        foreground_changed
-            | self.handle_client_shell_api_request(
+        pending_changed
+            | foreground_changed
+            | self.handle_client_shell_api_request_after_internal_events_drained(
                 client_id,
                 api::ApiRequestMessage {
                     request: *request,

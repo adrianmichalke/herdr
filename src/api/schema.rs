@@ -148,6 +148,8 @@ operations::define_operations! {
     PluginPaneFocus(PluginPaneFocusParams) => "plugin.pane.focus", true, false;
     PluginPaneClose(PluginPaneCloseParams) => "plugin.pane.close", true, false;
     TabMoveToWorkspace(TabMoveToWorkspaceParams) => "tab.move_to_workspace", true, true;
+    SessionHistorySnapshot(EmptyParams) => "session.history_snapshot", false, false;
+    PaneFocusIfSession(PaneFocusIfSessionParams) => "pane.focus_if_session", true, true;
 }
 
 #[cfg(test)]

@@ -48,6 +48,13 @@ crate::cli::projection::cli_params! {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneFocusIfSessionParams {
+    pub pane_id: String,
+    pub terminal_id: String,
+    pub agent_session: AgentSessionInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneLinkActivateParams {
     pub pane_id: String,
     pub viewport_row: u16,

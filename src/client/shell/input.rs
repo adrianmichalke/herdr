@@ -247,7 +247,8 @@ impl ClientShellState {
                 }
                 RawInputEvent::Text(text) => {
                     let text = text.into_string();
-                    if self.insert_session_picker_text(&text)
+                    if self.insert_history_text(&text, &mut outcome)
+                        || self.insert_session_picker_text(&text)
                         || matches!(
                             self.overlay,
                             Some(
@@ -292,7 +293,8 @@ impl ClientShellState {
                     }
                 }
                 RawInputEvent::Paste(text) => {
-                    if self.insert_session_picker_text(&text)
+                    if self.insert_history_text(&text, &mut outcome)
+                        || self.insert_session_picker_text(&text)
                         || matches!(
                             self.overlay,
                             Some(
@@ -351,6 +353,9 @@ impl ClientShellState {
                 RawInputEvent::OuterFocusLost => {
                     outcome.repaint |= self.clear_link_hover();
                     self.outer_focused = Some(false);
+                    if let Some(ClientShellOverlay::PiHistory(history)) = self.overlay.as_mut() {
+                        history.release_pointer();
+                    }
                     self.release_input_leases(&mut outcome);
                     outcome
                         .requests
@@ -571,6 +576,9 @@ impl ClientShellState {
     }
 
     pub(super) fn modal_paste_target_active(&self) -> bool {
+        if let Some(ClientShellOverlay::PiHistory(history)) = self.overlay.as_ref() {
+            return history.query_active();
+        }
         if let Some(ClientShellOverlay::SessionPicker(picker)) = self.overlay.as_ref() {
             return picker.new_name.is_some() && !picker.switching;
         }
@@ -628,7 +636,9 @@ impl ClientShellState {
             return false;
         }
         if let Some(text) = read_clipboard_text() {
-            let inserted = self.insert_copy_search_text(&text) || self.insert_overlay_text(&text);
+            let inserted = self.insert_history_text(&text, outcome)
+                || self.insert_copy_search_text(&text)
+                || self.insert_overlay_text(&text);
             outcome.repaint |= inserted;
         }
         true
@@ -656,7 +666,10 @@ impl ClientShellState {
             }
             return None;
         }
-        if self.route_tab_move_key(key, outcome) || self.route_session_picker_key(key, outcome) {
+        if self.route_history_key(key, outcome)
+            || self.route_tab_move_key(key, outcome)
+            || self.route_session_picker_key(key, outcome)
+        {
             return None;
         }
         if matches!(self.overlay, Some(ClientShellOverlay::GlobalMenu(_))) {
@@ -679,6 +692,20 @@ impl ClientShellState {
             return None;
         }
         if matches!(key.code, KeyCode::Modifier(_)) {
+            return None;
+        }
+        if matches!(
+            self.mode,
+            ClientShellMode::Terminal | ClientShellMode::Navigate | ClientShellMode::Resize
+        ) && self.history_shortcut_available(key)
+            && matches!(
+                crate::input::resolve_direct_binding(&self.config.keybinds.keybinds, key),
+                Some(crate::input::KeybindMatch::Action(
+                    crate::input::KeybindAction::OpenPiHistory
+                ))
+            )
+        {
+            self.open_history(outcome);
             return None;
         }
         self.word_selection_gesture = None;
@@ -1144,6 +1171,7 @@ impl ClientShellState {
                     | ClientShellOverlay::ReleaseNotes(_)
                     | ClientShellOverlay::SessionPicker(_)
                     | ClientShellOverlay::TabMove(_)
+                    | ClientShellOverlay::PiHistory(_)
                     | ClientShellOverlay::GlobalMenu(_)
             )
         ) || self

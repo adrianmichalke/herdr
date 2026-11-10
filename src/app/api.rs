@@ -932,6 +932,12 @@ impl App {
 
     #[cfg(test)]
     pub(crate) fn handle_api_request(&mut self, request: crate::api::schema::Request) -> String {
+        if matches!(
+            request.method,
+            crate::api::schema::Method::SessionHistorySnapshot(_)
+        ) {
+            return self.handle_session_history_snapshot(request.id);
+        }
         self.drain_all_internal_events();
         self.handle_api_request_after_internal_events_drained(request)
     }
@@ -940,6 +946,12 @@ impl App {
         &mut self,
         request: crate::api::schema::Request,
     ) -> String {
+        if matches!(
+            request.method,
+            crate::api::schema::Method::SessionHistorySnapshot(_)
+        ) {
+            return self.handle_session_history_snapshot(request.id);
+        }
         if self.transfer_request_is_fenced(&request) {
             return responses::encode_error(
                 request.id,
@@ -1073,6 +1085,9 @@ impl App {
                 );
             }
             Method::SessionSnapshot(_) => return self.handle_session_snapshot(request.id),
+            Method::SessionHistorySnapshot(_) => {
+                return self.handle_session_history_snapshot(request.id);
+            }
             Method::WorkspaceTransfer(_) | Method::WorkspaceTransferStatus(_) => {
                 return responses::encode_error(
                     request.id,
@@ -1201,6 +1216,9 @@ impl App {
             Method::PaneCurrent(params) => return self.handle_pane_current(request.id, params),
             Method::PaneGet(target) => return self.handle_pane_get(request.id, target),
             Method::PaneFocus(target) => return self.handle_pane_focus(request.id, target),
+            Method::PaneFocusIfSession(params) => {
+                return self.handle_pane_focus_if_session(request.id, params);
+            }
             Method::PaneInputSet(params) => return self.handle_pane_input_set(request.id, params),
             Method::PaneLinkResolve(params) => {
                 return self.handle_pane_link_resolve(request.id, params);

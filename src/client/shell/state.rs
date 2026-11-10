@@ -146,6 +146,7 @@ pub(super) struct ShellHitMap {
     pub(super) release_notes_scrollbar: Rect,
     pub(super) release_notes_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) release_notes_max_scroll: usize,
+    pub(super) history: super::history::HistoryHitMap,
 }
 
 #[derive(Clone)]
@@ -261,6 +262,21 @@ pub(crate) enum ClientShellAction {
         endpoint_id: ClientEndpointId,
         target: Option<ClientEndpointFocusTarget>,
     },
+    History {
+        machine: ClientEndpointId,
+        request_id: u64,
+        request: Box<crate::pi_history::types::HistoryRequest>,
+    },
+    HistoryCancel {
+        request_id: u64,
+    },
+    HistoryNavigate {
+        machine: ClientEndpointId,
+        request_id: u64,
+        request: Box<crate::pi_history::types::HistoryRequest>,
+        location: crate::pi_history::types::HistoryLocation,
+        open_session: bool,
+    },
     SessionList {
         machine: ClientEndpointId,
         request_id: u64,
@@ -320,6 +336,7 @@ pub(super) enum ClientShellOverlayKind {
     Settings,
     SessionPicker,
     TabMove,
+    PiHistory,
 }
 
 #[derive(Debug)]
@@ -638,6 +655,7 @@ pub(super) enum ClientShellOverlay {
     Settings(ClientSettingsOverlay),
     SessionPicker(super::sessions::SessionPickerOverlay),
     TabMove(super::tab_move::TabMovePicker),
+    PiHistory(Box<super::history::PiHistoryOverlay>),
 }
 
 impl ClientShellOverlay {
@@ -658,6 +676,7 @@ impl ClientShellOverlay {
             Self::Settings(_) => ClientShellOverlayKind::Settings,
             Self::SessionPicker(_) => ClientShellOverlayKind::SessionPicker,
             Self::TabMove(_) => ClientShellOverlayKind::TabMove,
+            Self::PiHistory(_) => ClientShellOverlayKind::PiHistory,
         }
     }
 }
@@ -962,6 +981,7 @@ pub(crate) struct ClientShellState {
     pub(super) reveal_navigation_workspace: bool,
     pub(super) overlay: Option<ClientShellOverlay>,
     pub(super) session_picker_serial: u64,
+    pub(super) history_serial: u64,
     pub(super) session_navigation_serial: u64,
     pub(super) previous_pane_id: Option<String>,
     pub(super) pane_mouse_gesture: Option<ClientPaneMouseGesture>,
@@ -1151,6 +1171,7 @@ impl ClientShellState {
             reveal_navigation_workspace: false,
             overlay,
             session_picker_serial: 0,
+            history_serial: 0,
             session_navigation_serial: 0,
             previous_pane_id: None,
             pane_mouse_gesture: None,
@@ -1384,10 +1405,11 @@ impl ClientShellState {
         self.endpoint_error_deadline = None;
         self.navigate_workspace_id = None;
         self.pending_workspace_highlight = None;
-        let picker = self
-            .overlay
-            .take()
-            .filter(|overlay| matches!(overlay, ClientShellOverlay::SessionPicker(_)));
+        let picker = self.overlay.take().filter(|overlay| match overlay {
+            ClientShellOverlay::SessionPicker(_) => true,
+            ClientShellOverlay::PiHistory(history) => history.navigation_active(),
+            _ => false,
+        });
         self.overlay = picker.or_else(|| {
             self.config
                 .startup_onboarding
@@ -1824,6 +1846,7 @@ impl ClientShellState {
                         | ClientShellOverlay::ProductAnnouncement(_)
                         | ClientShellOverlay::SessionPicker(_)
                         | ClientShellOverlay::TabMove(_)
+                        | ClientShellOverlay::PiHistory(_)
                 )
             ) {
                 self.overlay = self

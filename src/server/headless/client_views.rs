@@ -256,6 +256,7 @@ impl HeadlessServer {
                 | Method::PaneCopySearch(_)
                 | Method::PaneEditScrollback(_)
                 | Method::PaneFocus(_)
+                | Method::PaneFocusIfSession(_)
                 | Method::PaneFocusDirection(_)
                 | Method::PaneInputSet(_)
                 | Method::PaneLinkActivate(_)
@@ -296,6 +297,7 @@ impl HeadlessServer {
                 | Method::PaneClose(_)
                 | Method::PaneEditScrollback(_)
                 | Method::PaneFocus(_)
+                | Method::PaneFocusIfSession(_)
                 | Method::PaneFocusDirection(_)
                 | Method::PaneResize(_)
                 | Method::PaneSplit(_)
@@ -822,6 +824,37 @@ impl HeadlessServer {
         &mut self,
         mut msg: api::ApiRequestMessage,
     ) -> bool {
+        if matches!(
+            msg.request.method,
+            api::schema::Method::SessionHistorySnapshot(_)
+        ) {
+            return self.handle_api_request_with_shutdown_check_inner(msg, true, false);
+        }
+        let pending_changed = if matches!(
+            msg.request.method,
+            api::schema::Method::PaneFocusIfSession(_)
+        ) {
+            self.drain_all_internal_events_with_forwarding()
+                | self.app.expire_due_metadata(Instant::now())
+        } else {
+            false
+        };
+        if let api::schema::Method::PaneFocusIfSession(params) = &msg.request.method {
+            if self.shutting_down || self.host_shutdown_requested() {
+                Self::reject_api_request_for_shutdown(msg);
+                return pending_changed;
+            }
+            if !self.app.pane_focus_session_is_current(params) {
+                let _ = msg
+                    .respond_to
+                    .send(crate::server::workspace_transfer::error_response(
+                        msg.request.id,
+                        "stale_agent_session",
+                        "pane or native agent session changed",
+                    ));
+                return pending_changed;
+            }
+        }
         let target_before = self.default_shell_target();
         let popup_before = self.app.state.popup_pane.is_some();
         let method_claims_geometry = Self::public_request_may_change_geometry(&msg.request.method);
@@ -869,11 +902,18 @@ impl HeadlessServer {
             &msg.request.method,
             api::schema::Method::PaneMove(params) if params.focus
         );
-        let response_proxy = (agent_focus_target.is_some() || inspect_pane_move).then(|| {
-            let (proxy_tx, proxy_rx) = std::sync::mpsc::channel();
-            let original = std::mem::replace(&mut msg.respond_to, proxy_tx);
-            (original, proxy_rx)
-        });
+        let inspect_conditional_focus = matches!(
+            msg.request.method,
+            api::schema::Method::PaneFocusIfSession(_)
+        );
+        let response_proxy = (agent_focus_target.is_some()
+            || inspect_pane_move
+            || inspect_conditional_focus)
+            .then(|| {
+                let (proxy_tx, proxy_rx) = std::sync::mpsc::channel();
+                let original = std::mem::replace(&mut msg.respond_to, proxy_tx);
+                (original, proxy_rx)
+            });
         let reconcile = Self::shell_locations_may_need_reconcile(&msg.request.method);
         let changed = self.handle_api_request_with_shutdown_check_inner(msg, false, false);
         let proxied_result = forward_proxied_api_response(response_proxy);
@@ -901,6 +941,7 @@ impl HeadlessServer {
             .or(explicit_public_focus_target)
             .is_some_and(|target| self.default_shell_target() == Some(target));
         let public_focus_succeeded = explicit_focus_succeeded
+            || (inspect_conditional_focus && proxied_request_succeeded)
             || (create_focus_requested && target_changed)
             || pane_move_focus_succeeded;
         if public_focus_succeeded {
@@ -915,7 +956,7 @@ impl HeadlessServer {
         }
         let geometry_changed =
             method_claims_geometry && self.reapply_controlled_shell_tab_geometry(false);
-        changed | geometry_changed
+        pending_changed | changed | geometry_changed
     }
 
     pub(super) fn client_request_is_transfer_fenced(
@@ -933,11 +974,52 @@ impl HeadlessServer {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn handle_client_shell_api_request(
         &mut self,
         client_id: u64,
         msg: api::ApiRequestMessage,
     ) -> bool {
+        let pending_changed = if matches!(
+            msg.request.method,
+            api::schema::Method::PaneFocusIfSession(_)
+        ) {
+            self.drain_all_internal_events_with_forwarding()
+                | self.app.expire_due_metadata(Instant::now())
+        } else {
+            false
+        };
+        pending_changed
+            | self.handle_client_shell_api_request_after_internal_events_drained(client_id, msg)
+    }
+
+    pub(super) fn handle_client_shell_api_request_after_internal_events_drained(
+        &mut self,
+        client_id: u64,
+        msg: api::ApiRequestMessage,
+    ) -> bool {
+        if matches!(
+            msg.request.method,
+            api::schema::Method::SessionHistorySnapshot(_)
+        ) {
+            return self.handle_api_request_with_shutdown_check_inner(msg, true, true);
+        }
+        if let api::schema::Method::PaneFocusIfSession(params) = &msg.request.method {
+            if self.shutting_down || self.host_shutdown_requested() {
+                Self::reject_api_request_for_shutdown(msg);
+                return false;
+            }
+            if !self.app.pane_focus_session_is_current(params) {
+                let _ = msg
+                    .respond_to
+                    .send(crate::server::workspace_transfer::error_response(
+                        msg.request.id,
+                        "stale_agent_session",
+                        "pane or native agent session changed",
+                    ));
+                return false;
+            }
+        }
         if self.client_request_is_transfer_fenced(client_id, &msg.request) {
             let _ = msg
                 .respond_to

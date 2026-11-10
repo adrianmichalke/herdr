@@ -37,6 +37,15 @@ pub(super) fn command() -> Command {
         .subcommand(machine::command())
         .subcommand(server_command())
         .subcommand(api_command())
+        .subcommand(
+            Command::new("history")
+                .about("Read associated raw Pi histories without starting sessions")
+                .arg(
+                    flag("stdio")
+                        .required(true)
+                        .help("Serve one protocol-v1 newline JSON history request"),
+                ),
+        )
         .subcommand(workspace_command())
         .subcommand(worktree_command())
         .subcommand(tab_command())

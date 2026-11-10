@@ -9,6 +9,8 @@ const METADATA_TIMEOUT: Duration = Duration::from_secs(15);
 #[path = "workspace_transfer.rs"]
 mod workspace_transfer;
 use workspace_transfer::{TransferFollow, WorkspaceTransfer};
+mod history;
+use history::{HistorySessionConnection, HistorySessionOpen};
 
 #[derive(Debug)]
 pub(super) enum SessionAction {
@@ -33,14 +35,14 @@ pub(super) enum SessionAction {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct MachineFingerprint {
-    machine: ClientEndpointId,
-    target: Option<String>,
-    configured_session: String,
+pub(super) struct MachineFingerprint {
+    pub(super) machine: ClientEndpointId,
+    pub(super) target: Option<String>,
+    pub(super) configured_session: String,
 }
 
 impl MachineFingerprint {
-    fn read(
+    pub(super) fn read(
         machine: &ClientEndpointId,
         catalog: &endpoint::EndpointCatalog,
         shell: &shell::ClientShellState,
@@ -166,6 +168,7 @@ struct Preparation {
     target: EndpointSessionTarget,
     staged: bool,
     owns_connection: bool,
+    allow_start: bool,
     cancelled: Arc<AtomicBool>,
     phase: PreparationPhase,
     deadline: Instant,
@@ -189,6 +192,9 @@ pub(super) struct SessionSwitchCoordinator {
     preparation: Option<Preparation>,
     queued: Option<QueuedOpen>,
     transfer: Option<WorkspaceTransfer>,
+    history_open: Option<HistorySessionOpen>,
+    history_connection: Option<HistorySessionConnection>,
+    history_result: Option<(u64, Result<(), String>)>,
 }
 
 impl Default for SessionSwitchCoordinator {
@@ -202,6 +208,9 @@ impl Default for SessionSwitchCoordinator {
             preparation: None,
             queued: None,
             transfer: None,
+            history_open: None,
+            history_connection: None,
+            history_result: None,
         }
     }
 }
@@ -237,7 +246,7 @@ pub(super) struct SessionSwitchContext<'a> {
 }
 
 impl SessionSwitchContext<'_> {
-    fn repaint(&mut self) {
+    pub(super) fn repaint(&mut self) {
         let frame = self.state.shell.as_mut().and_then(|shell| {
             shell.compose(self.state.reported_size.0, self.state.reported_size.1)
         });
@@ -279,7 +288,7 @@ impl SessionSwitchContext<'_> {
                 shell.mark_endpoint_disconnected(&preparation.endpoint_id);
             }
         }
-        if !preparation.staged && preparation.owns_connection {
+        if !preparation.staged && preparation.owns_connection && preparation.allow_start {
             let configured = preparation
                 .endpoint_id
                 .ssh_profile_id()
@@ -363,7 +372,8 @@ impl SessionSwitchCoordinator {
             .is_some_and(|queued| changed(&queued.key))
         {
             if let Some(queued) = self.queued.take() {
-                context.finish(
+                self.finish(
+                    context,
                     queued.key.request_id,
                     Err("The selected machine configuration changed".into()),
                 );
@@ -381,7 +391,8 @@ impl SessionSwitchCoordinator {
                 .key
                 .request_id;
             self.cancel(request_id, context);
-            context.finish(
+            self.finish(
+                context,
                 request_id,
                 Err("The selected machine configuration changed".into()),
             );
@@ -393,7 +404,8 @@ impl SessionSwitchCoordinator {
             shell.note_session_navigation();
         }
         if let Some(queued) = self.queued.take() {
-            context.finish(
+            self.finish(
+                context,
                 queued.key.request_id,
                 Err("Session switch cancelled".into()),
             );
@@ -404,7 +416,7 @@ impl SessionSwitchCoordinator {
     }
 
     pub(super) fn busy(&self) -> bool {
-        self.preparation.is_some() || self.queued.is_some()
+        self.preparation.is_some() || self.queued.is_some() || self.history_connection.is_some()
     }
 
     pub(super) fn actions(
@@ -412,6 +424,7 @@ impl SessionSwitchCoordinator {
         actions: Vec<SessionAction>,
         context: &mut SessionSwitchContext<'_>,
     ) -> Result<(), ClientError> {
+        self.cancel_obsolete_history(context);
         for action in actions {
             match action {
                 SessionAction::Cancel { request_id } => self.cancel(request_id, context),
@@ -496,7 +509,7 @@ impl SessionSwitchCoordinator {
                     let fingerprint = match fingerprint {
                         Ok(fingerprint) => fingerprint,
                         Err(error) => {
-                            context.finish(request_id, Err(error));
+                            self.finish(context, request_id, Err(error));
                             continue;
                         }
                     };
@@ -579,18 +592,21 @@ impl SessionSwitchCoordinator {
             .as_ref()
             .is_some_and(|follow| !follow.is_current(request_id, false, context))
         {
-            context.finish(
+            self.finish(
+                context,
                 request_id,
                 Err("The view changed; open the destination session manually".into()),
             );
             return;
         }
-        if !queued.key.is_current(context)
+        if !self.history_is_current(request_id, context)
+            || !queued.key.is_current(context)
             || self
                 .fingerprint(&queued.key.fingerprint.machine, context)
                 .is_err()
         {
-            context.finish(
+            self.finish(
+                context,
                 request_id,
                 Err("The selected machine configuration changed".into()),
             );
@@ -599,7 +615,7 @@ impl SessionSwitchCoordinator {
         let endpoint_id = match queued.key.fingerprint.endpoint_id(&queued.session) {
             Ok(endpoint_id) => endpoint_id,
             Err(error) => {
-                context.finish(request_id, Err(error));
+                self.finish(context, request_id, Err(error));
                 return;
             }
         };
@@ -611,12 +627,14 @@ impl SessionSwitchCoordinator {
             .filter(|current| current.session_name == queued.session)
             .map(|current| current.endpoint_id.clone());
         if retained_binding.is_some() && queued.create {
-            context.finish(
+            self.finish(
+                context,
                 request_id,
                 Err("A session with this name already exists".into()),
             );
             return;
         }
+        let allow_start = self.history_allow_start(request_id).unwrap_or(true);
         let endpoint_id = retained_binding.clone().unwrap_or(endpoint_id);
         let target = queued
             .key
@@ -626,7 +644,7 @@ impl SessionSwitchCoordinator {
             && context.endpoints.active_id() == &endpoint_id
             && context.endpoints.active_surface_available()
         {
-            context.finish(request_id, Ok(()));
+            self.finish(context, request_id, Ok(()));
             return;
         }
         if retained_binding.is_some() {
@@ -638,6 +656,7 @@ impl SessionSwitchCoordinator {
                     target,
                     staged: false,
                     owns_connection: false,
+                    allow_start,
                     cancelled: Arc::new(AtomicBool::new(false)),
                     phase: PreparationPhase::Metadata,
                     deadline: Instant::now() + METADATA_TIMEOUT,
@@ -656,7 +675,8 @@ impl SessionSwitchCoordinator {
                 )
             })
         {
-            context.finish(
+            self.finish(
+                context,
                 request_id,
                 Err("The selected session cannot be staged".into()),
             );
@@ -677,6 +697,7 @@ impl SessionSwitchCoordinator {
             target: target.clone(),
             staged: retained_binding.is_none(),
             owns_connection: true,
+            allow_start,
             cancelled: Arc::clone(&cancelled),
             phase: PreparationPhase::Preparing,
             deadline: Instant::now() + PREPARATION_TIMEOUT,
@@ -706,8 +727,18 @@ impl SessionSwitchCoordinator {
                         return Err("A session with this name already exists".into());
                     }
                 }
-                endpoint::connect_session_once(target, options, endpoint_id, generation, cancelled)
-                    .map_err(|error| error.to_string())
+                if allow_start {
+                    endpoint::connect_session_once(
+                        target,
+                        options,
+                        endpoint_id,
+                        generation,
+                        cancelled,
+                    )
+                } else {
+                    history::connect_existing(target, options, endpoint_id, generation, cancelled)
+                }
+                .map_err(|error| error.to_string())
             })
             .await
             .unwrap_or_else(|error| Err(error.to_string()));
@@ -775,7 +806,10 @@ impl SessionSwitchCoordinator {
                         .as_ref()
                         .is_none_or(|follow| follow.is_current(key.request_id, false, context))
                 });
-                let result = if key.is_current(context) && follow_current {
+                let result = if key.is_current(context)
+                    && follow_current
+                    && self.history_is_current(key.request_id, context)
+                {
                     result
                 } else {
                     Err("The selected machine or view changed; open the session manually".into())
@@ -817,7 +851,7 @@ impl SessionSwitchCoordinator {
                             .take()
                             .expect("matched session preparation");
                         context.discard(preparation);
-                        context.finish(key.request_id, Err(message));
+                        self.finish(context, key.request_id, Err(message));
                     }
                 }
             }
@@ -829,6 +863,7 @@ impl SessionSwitchCoordinator {
         &mut self,
         context: &mut SessionSwitchContext<'_>,
     ) -> Result<(), ClientError> {
+        self.cancel_obsolete_history(context);
         self.drive_transfer(context);
         if let Some((endpoint_id, generation, serial, result)) =
             context.state.activation_completion.take()
@@ -842,6 +877,7 @@ impl SessionSwitchCoordinator {
                 let preparation = self.preparation.take().expect("matched session activation");
                 let request_id = preparation.key.request_id;
                 let committed = result.is_ok()
+                    && self.history_is_current(request_id, context)
                     && !preparation.cancelled.load(Ordering::Acquire)
                     && preparation
                         .follow
@@ -881,13 +917,22 @@ impl SessionSwitchCoordinator {
                         .and_then(|id| context.catalog.ssh.iter().find(|profile| &profile.id == id))
                         .cloned();
                     if preparation.owns_connection {
-                        context.supervisors.adopt_session(
-                            endpoint_id.clone(),
-                            preparation.target,
-                            configured,
-                            preparation.generation,
-                            Instant::now(),
-                        );
+                        if preparation.allow_start {
+                            context.supervisors.adopt_session(
+                                endpoint_id.clone(),
+                                preparation.target,
+                                configured,
+                                preparation.generation,
+                                Instant::now(),
+                            );
+                        } else {
+                            self.retain_history_connection(
+                                endpoint_id.clone(),
+                                preparation.target,
+                                configured,
+                                preparation.generation,
+                            );
+                        }
                     }
                     let previous_selection = context.catalog.selected_profile.clone();
                     context.catalog.select_endpoint(&endpoint_id);
@@ -896,10 +941,11 @@ impl SessionSwitchCoordinator {
                             warn!(%error, "failed to persist selected machine");
                         }
                     }
-                    context.finish(request_id, Ok(()));
+                    self.finish(context, request_id, Ok(()));
                 } else {
                     context.discard(preparation);
-                    context.finish(
+                    self.finish(
+                        context,
                         request_id,
                         Err(result
                             .err()
@@ -907,6 +953,36 @@ impl SessionSwitchCoordinator {
                     );
                 }
             }
+        }
+        let unsupported_history = self.preparation.as_ref().is_some_and(|preparation| {
+            preparation.phase == PreparationPhase::Metadata
+                && self
+                    .history_allow_start(preparation.key.request_id)
+                    .is_some()
+                && context
+                    .endpoints
+                    .connection(&preparation.endpoint_id)
+                    .is_some_and(|connection| {
+                        !connection
+                            .negotiation
+                            .supports_method("pane.focus_if_session")
+                    })
+        });
+        if unsupported_history {
+            let preparation = self
+                .preparation
+                .take()
+                .expect("unsupported history session");
+            let request_id = preparation.key.request_id;
+            context.discard(preparation);
+            self.finish(
+                context,
+                request_id,
+                Err(
+                    "This server does not support safe history navigation; update and restart it"
+                        .into(),
+                ),
+            );
         }
         let stale_follow = self.preparation.as_ref().is_some_and(|preparation| {
             preparation.follow.as_ref().is_some_and(|follow| {
@@ -921,7 +997,8 @@ impl SessionSwitchCoordinator {
             if let Some(preparation) = &self.preparation {
                 let request_id = preparation.key.request_id;
                 self.cancel(request_id, context);
-                context.finish(
+                self.finish(
+                    context,
                     request_id,
                     Err("The view changed; open the destination session manually".into()),
                 );
@@ -936,7 +1013,8 @@ impl SessionSwitchCoordinator {
                         .expect("checked session preparation");
                     let request_id = preparation.key.request_id;
                     context.discard(preparation);
-                    context.finish(
+                    self.finish(
+                        context,
                         request_id,
                         Err("The session could not be activated safely".into()),
                     );
@@ -953,7 +1031,8 @@ impl SessionSwitchCoordinator {
                     .expect("checked session preparation");
                 let request_id = preparation.key.request_id;
                 context.discard(preparation);
-                context.finish(
+                self.finish(
+                    context,
                     request_id,
                     Err("The target session did not become ready".into()),
                 );
@@ -1037,7 +1116,7 @@ impl SessionSwitchCoordinator {
                             .expect("checked session preparation");
                         let request_id = preparation.key.request_id;
                         context.discard(preparation);
-                        context.finish(request_id, Err(error));
+                        self.finish(context, request_id, Err(error));
                     }
                 }
             }

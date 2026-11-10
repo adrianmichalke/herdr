@@ -37,6 +37,7 @@ mod noninteractive_process;
 mod pane;
 use ghostty_vt::pane_graphics_files;
 mod persist;
+mod pi_history;
 mod platform;
 mod plugin_command;
 mod plugin_installations;
@@ -152,6 +153,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # open_notification_target = "prefix+o"
 # workspace_picker = "prefix+w"
 # goto = "prefix+g"
+history_search = "ctrl+f"
 # new_workspace = "prefix+shift+n"
 # new_worktree = "prefix+shift+g"
 # open_worktree = ""    # optional, unset by default

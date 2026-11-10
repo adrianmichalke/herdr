@@ -43,6 +43,10 @@ impl ClientShellState {
                     self.begin_worktree_action(action, outcome);
                     return;
                 }
+                if action == crate::input::KeybindAction::OpenPiHistory {
+                    self.open_history(outcome);
+                    return;
+                }
                 if action == crate::input::KeybindAction::OpenNavigator {
                     self.open_navigator_overlay();
                     outcome.repaint = true;

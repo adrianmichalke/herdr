@@ -548,6 +548,12 @@
           "description": "Open the session navigator."
         },
         {
+          "key": "keys.history_search",
+          "type": "keybinding",
+          "default": "\"ctrl+f\"",
+          "description": "Search saved Pi histories on the selected machine. Remap or disable to forward Ctrl+F to the focused application."
+        },
+        {
           "key": "keys.navigate_workspace_up",
           "type": "keybinding",
           "default": "\"up\"",
