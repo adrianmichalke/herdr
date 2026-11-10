@@ -129,6 +129,11 @@ integration-assets-test:
     bun test src/integration/assets/opencode/herdr-tui-session.test.ts
     just vim-integration-test
     just pi-discord-preference-test
+    just pi-fast-preference-test
+
+pi-fast-preference-test:
+    {{python}} -m unittest scripts.test_pi_fast_preference_installer
+    bun test src/integration/assets/pi/preferences/fast-mode-wire.test.ts
 
 pi-discord-preference-test:
     {{python}} -m unittest scripts.test_pi_discord_preference_installer
