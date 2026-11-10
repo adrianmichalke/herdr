@@ -173,6 +173,13 @@ impl ClientShellState {
             {
                 self.hits.context_menu_rows = rendered.menu_rows;
             }
+        } else if let Some(ClientShellOverlay::PiHistory(history)) = self.overlay.as_ref() {
+            if let Some(rendered) =
+                super::history::render_history_overlay(&mut buffer, history, &self.config.palette)
+            {
+                self.hits.history = rendered.history;
+                cursor = rendered.cursor;
+            }
         } else if let Some(ClientShellOverlay::SessionPicker(picker)) = self.overlay.as_ref() {
             if let Some(rendered) =
                 render::render_session_picker_overlay(&mut buffer, picker, &self.config.palette)
@@ -221,6 +228,7 @@ impl ClientShellState {
             self.reveal_mobile_workspace = true;
         }
         self.last_composed_size = Some((cols, rows));
+        self.prepare_history_layout(cols, rows);
         let valid_navigation_target = self.mode == ClientShellMode::Navigate
             && self
                 .navigate_workspace_id
@@ -819,6 +827,7 @@ impl ClientShellState {
                 self.hits.release_notes_scrollbar = rendered.release_notes_scrollbar;
                 self.hits.release_notes_scroll_metrics = rendered.release_notes_scroll_metrics;
                 self.hits.release_notes_max_scroll = rendered.release_notes_max_scroll;
+                self.hits.history = rendered.history;
                 rendered.cursor
             };
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
@@ -837,7 +846,10 @@ impl ClientShellState {
                 .min(u16::try_from(self.hits.release_notes_max_scroll).unwrap_or(u16::MAX));
         }
         if self.endpoint_status(&self.active_endpoint_id) != Some(ClientEndpointStatus::Online) {
-            if !matches!(self.overlay, Some(ClientShellOverlay::SessionPicker(_))) {
+            if !matches!(
+                self.overlay,
+                Some(ClientShellOverlay::SessionPicker(_) | ClientShellOverlay::PiHistory(_))
+            ) {
                 frame.cursor = None;
             }
             self.hits.panes.clear();

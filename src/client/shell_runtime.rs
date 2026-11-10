@@ -11,6 +11,7 @@ pub(super) fn dispatch_client_shell_actions(
     let mut replay_mouse = Vec::new();
     let mut repaint = false;
     let mut session_actions = Vec::new();
+    let mut history_actions = Vec::new();
     for action in actions {
         match action {
             shell::ClientShellAction::Endpoint {
@@ -49,6 +50,35 @@ pub(super) fn dispatch_client_shell_actions(
                     endpoint_id,
                     target,
                     force: false,
+                });
+            }
+            shell::ClientShellAction::History {
+                machine,
+                request_id,
+                request,
+            } => {
+                history_actions.push(pi_history::HistoryClientAction::Request {
+                    machine,
+                    request_id,
+                    request,
+                });
+            }
+            shell::ClientShellAction::HistoryCancel { request_id } => {
+                history_actions.push(pi_history::HistoryClientAction::Cancel { request_id });
+            }
+            shell::ClientShellAction::HistoryNavigate {
+                machine,
+                request_id,
+                request,
+                location,
+                open_session,
+            } => {
+                history_actions.push(pi_history::HistoryClientAction::Navigate {
+                    machine,
+                    request_id,
+                    request,
+                    location: Box::new(location),
+                    open_session,
                 });
             }
             shell::ClientShellAction::SessionList {
@@ -105,8 +135,11 @@ pub(super) fn dispatch_client_shell_actions(
             }
         }
     }
-    if !session_actions.is_empty() {
-        *scheduled_activation = Some(ClientLoopEvent::SessionActions(session_actions));
+    if !session_actions.is_empty() || !history_actions.is_empty() {
+        *scheduled_activation = Some(ClientLoopEvent::ShellActions {
+            sessions: session_actions,
+            history: history_actions,
+        });
     }
     // A source-off-first handoff leaves the registry's committed identity pointing at a
     // deliberately surface-inactive source. Do not drain its retained queue into a server that

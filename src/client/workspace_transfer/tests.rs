@@ -301,6 +301,7 @@ impl Harness {
             target: EndpointSessionTarget::Local(queued.session),
             staged: true,
             owns_connection: true,
+            allow_start: true,
             cancelled: Arc::new(AtomicBool::new(false)),
             phase: PreparationPhase::Metadata,
             deadline: Instant::now() + METADATA_TIMEOUT,

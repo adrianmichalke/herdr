@@ -715,6 +715,7 @@ impl ClientShellState {
             Some(
                 ClientShellOverlay::SessionPicker(_)
                     | ClientShellOverlay::TabMove(_)
+                    | ClientShellOverlay::PiHistory(_)
                     | ClientShellOverlay::GlobalMenu(_)
             )
         ) && self
@@ -728,7 +729,8 @@ impl ClientShellState {
             }
             return;
         }
-        if self.handle_tab_move_mouse(mouse, outcome)
+        if self.handle_history_mouse(mouse, outcome)
+            || self.handle_tab_move_mouse(mouse, outcome)
             || self.handle_session_picker_mouse(mouse, outcome)
         {
             return;

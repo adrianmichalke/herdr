@@ -119,6 +119,15 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
             exit_code
         }
         "api" => api::run_api_command(&args[2..])?,
+        "history" => {
+            if args[2..] != ["--stdio"] {
+                eprintln!("usage: herdr history --stdio");
+                2
+            } else {
+                crate::pi_history::run_stdio()?;
+                0
+            }
+        }
         "status" => status::run_status_command(&args[2..])?,
         "completion" | "completions" => completion::run_completion_command(&args[2..])?,
         "config" => run_config_command(&args[2..])?,

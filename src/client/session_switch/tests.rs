@@ -112,6 +112,7 @@ fn stage(
         target: EndpointSessionTarget::Local(session.to_owned()),
         staged: true,
         owns_connection: true,
+        allow_start: true,
         cancelled: Arc::new(AtomicBool::new(false)),
         phase: PreparationPhase::Preparing,
         deadline: Instant::now() + PREPARATION_TIMEOUT,
@@ -450,4 +451,98 @@ fn catalog_label_changes_preserve_discovery_but_destination_edits_cancel_it() {
     assert!(cancelled.load(Ordering::Acquire));
     assert!(coordinator.discovery.is_none());
     harness.source_is_usable();
+}
+
+#[test]
+fn existing_only_preparation_failure_never_schedules_a_start_capable_retry() {
+    for allow_start in [false, true] {
+        let mut harness = Harness::new();
+        let mut coordinator = SessionSwitchCoordinator::default();
+        stage(&mut harness, &mut coordinator, 1);
+        let mut preparation = coordinator.preparation.take().unwrap();
+        preparation.staged = false;
+        preparation.allow_start = allow_start;
+        let endpoint_id = preparation.endpoint_id.clone();
+        harness.context().discard(preparation);
+        assert_eq!(
+            harness.supervisors.retry_now(&endpoint_id, Instant::now()),
+            allow_start
+        );
+        harness.source_is_usable();
+    }
+}
+
+#[test]
+fn existing_only_connections_remain_busy_and_unadopted_until_successful_history_focus() {
+    for outcome in ["success", "failure", "cancel", "disconnect"] {
+        let mut harness = Harness::new();
+        let shell = harness.state.shell.as_mut().unwrap();
+        shell.set_endpoint_snapshot_for_generation(
+            &ClientEndpointId::Local,
+            41,
+            Box::new(shell::test_snapshot()),
+        );
+        shell.set_endpoint_status(
+            &ClientEndpointId::Local,
+            endpoint::ClientEndpointStatus::Online,
+        );
+        let session = shell.initial_session_name().to_owned();
+        let input = shell.handle_raw_events(vec![crate::raw_input::RawInputEvent::Key(
+            crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Char('f'),
+                crossterm::event::KeyModifiers::CONTROL,
+            ),
+        )]);
+        let shell::ClientShellAction::History {
+            request_id: history_request,
+            ..
+        } = input.actions.into_iter().next().unwrap()
+        else {
+            panic!("history ownership");
+        };
+        let mut coordinator = SessionSwitchCoordinator::default();
+        coordinator
+            .open_history(
+                history_request,
+                &ClientEndpointId::Local,
+                &session,
+                false,
+                &mut harness.context(),
+            )
+            .unwrap();
+        let session_request = coordinator.queued.take().unwrap().key.request_id;
+        harness.supervisors.remove(&ClientEndpointId::Local);
+        coordinator.retain_history_connection(
+            ClientEndpointId::Local,
+            EndpointSessionTarget::Local(session),
+            None,
+            41,
+        );
+        coordinator.finish(&mut harness.context(), session_request, Ok(()));
+        assert!(coordinator.busy());
+        assert_eq!(
+            coordinator.take_history_result(),
+            Some((history_request, Ok(())))
+        );
+        assert!(!harness
+            .supervisors
+            .disconnected(&ClientEndpointId::Local, 41, Instant::now()));
+        match outcome {
+            "cancel" => coordinator.cancel_history(history_request, &mut harness.context()),
+            "disconnect" => {
+                harness.endpoints.disconnect(&ClientEndpointId::Local);
+                coordinator.finish_history(history_request, true, &mut harness.context());
+            }
+            "success" => coordinator.finish_history(history_request, true, &mut harness.context()),
+            "failure" => coordinator.finish_history(history_request, false, &mut harness.context()),
+            _ => unreachable!(),
+        }
+        assert!(!coordinator.busy());
+        assert_eq!(
+            harness
+                .supervisors
+                .disconnected(&ClientEndpointId::Local, 41, Instant::now()),
+            outcome == "success"
+        );
+    }
 }

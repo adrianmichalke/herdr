@@ -2969,6 +2969,38 @@ pub(super) fn cached_remote_api_command(
     posix_base64_command(&script)
 }
 
+pub(super) fn remote_existing_client_bridge_command(
+    remote_herdr: &RemoteHerdr,
+    session_name: &str,
+) -> String {
+    let args = [
+        "--session",
+        session_name,
+        "remote-client-bridge",
+        super::EXISTING_ONLY_CLIENT_BRIDGE_FLAG,
+    ];
+    match &remote_herdr.executable {
+        RemoteExecutable::PosixShellPath(_) => posix_base64_command(&posix_remote_output_command(
+            &format!("exec {} <&3", remote_herdr.executable.command(&args)),
+        )),
+        RemoteExecutable::WindowsPath(path) => {
+            windows_powershell_streaming_application_command(path, &args)
+        }
+    }
+}
+
+pub(super) fn remote_history_command(remote_herdr: &RemoteHerdr, session_name: &str) -> String {
+    let args = ["--session", session_name, "history", "--stdio"];
+    match &remote_herdr.executable {
+        RemoteExecutable::PosixShellPath(_) => posix_base64_command(&posix_remote_output_command(
+            &format!("exec {} <&3", remote_herdr.executable.command(&args)),
+        )),
+        RemoteExecutable::WindowsPath(path) => {
+            windows_powershell_streaming_application_command(path, &args)
+        }
+    }
+}
+
 pub(super) fn remote_api_bridge_command(
     remote_herdr: &RemoteHerdr,
     session_name: &str,
@@ -3061,6 +3093,9 @@ impl SshStdioBridge {
         noninteractive: bool,
         should_stop: Arc<AtomicBool>,
     ) -> io::Result<Self> {
+        if should_stop.load(Ordering::Acquire) {
+            return Err(super::process::cancelled());
+        }
         crate::ipc::prepare_socket_path(&local_socket, |path| {
             format!("remote bridge is already listening at {}", path.display())
         })?;
@@ -4020,6 +4055,26 @@ mod tests {
         client.write_all(&payload).unwrap();
         drop(client);
         assert_eq!(worker.join().unwrap(), expected);
+    }
+
+    #[test]
+    fn history_bridge_rejects_cancellation_before_binding_or_spawning() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-history-cancelled-{}.sock",
+            std::process::id()
+        ));
+        let error = SshStdioBridge::start_command(
+            "unused.invalid".into(),
+            "must not run".into(),
+            path.clone(),
+            None,
+            true,
+            Arc::new(AtomicBool::new(true)),
+        )
+        .err()
+        .expect("cancelled history bridge");
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+        assert!(!path.exists());
     }
 
     #[cfg(unix)]
@@ -5095,6 +5150,150 @@ mod tests {
                 .executable,
             path
         );
+    }
+
+    #[test]
+    fn existing_client_bridge_command_preserves_posix_stdin_and_literal_arguments() {
+        for os in ["linux", "macos"] {
+            for path in ["/opt/herdr", "/home/a b/o'brien/$literal`path`\"/herdr"] {
+                let remote = RemoteHerdr::for_platform(RemotePlatform { os, arch: "x86_64" })
+                    .with_posix_path(path);
+                for session in [
+                    "default",
+                    "--work",
+                    "a.b_c-1",
+                    "work 'quoted' $literal`name`",
+                ] {
+                    let command = remote_existing_client_bridge_command(&remote, session);
+                    assert!(command.starts_with("/bin/sh -c 'exec 3<&0; echo "));
+                    assert!(command.ends_with("| /bin/sh -s'"));
+                    for banned in ['$', '`', '"'] {
+                        assert!(!command.contains(banned), "{banned} in {command}");
+                    }
+                    let script = String::from_utf8(
+                        base64::engine::general_purpose::STANDARD
+                            .decode(command.split_whitespace().nth(5).unwrap())
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        script,
+                        format!(
+                            "printf '\\n%s\\n' '{REMOTE_OUTPUT_READY_MARKER}'\nexec {} --session {} remote-client-bridge --existing-only-v1 <&3",
+                            shell_quote(path),
+                            shell_quote(session)
+                        )
+                    );
+                    for banned in ["</dev/null", "server", "install"] {
+                        assert!(!script.contains(banned), "{banned} in {script}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn existing_client_bridge_command_uses_windows_streaming_without_startup() {
+        for path in [
+            r"C:\Herdr Bin\herdr.exe",
+            r"C:\Users\O'Brien\Herdr $build`literal\herdr.exe",
+        ] {
+            let remote = RemoteHerdr::for_platform(RemotePlatform {
+                os: "windows",
+                arch: "x86_64",
+            })
+            .with_windows_path(path.into());
+            for session in ["default", "--work", "a.b_c-1"] {
+                let command = remote_existing_client_bridge_command(&remote, session);
+                let script = decode_windows_command(&command);
+                assert!(script.contains(REMOTE_OUTPUT_READY_MARKER));
+                assert!(
+                    script.ends_with(&format!(
+                        "$process = Start-Process -FilePath {} -ArgumentList '--session {session} remote-client-bridge --existing-only-v1' -NoNewWindow -PassThru -ErrorAction Stop; $null = $process.Handle; $process.WaitForExit(); exit $process.ExitCode",
+                        crate::platform::quote_powershell_arg(path)
+                    )),
+                    "{script}"
+                );
+                for banned in ["-RedirectStandardInput", "server", "install"] {
+                    assert!(!script.contains(banned), "{banned} in {script}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn remote_history_command_preserves_posix_stdin_and_literal_arguments() {
+        for os in ["linux", "macos"] {
+            for path in [
+                "/opt/herdr",
+                "/home/a b/herdr",
+                "/home/o'brien/herdr",
+                "/opt/herdr-$build/herdr",
+                "/opt/herdr`id`/herdr",
+                "/opt/herdr\"quote/herdr",
+            ] {
+                let remote = RemoteHerdr::for_platform(RemotePlatform { os, arch: "x86_64" })
+                    .with_posix_path(path);
+                for session in ["default", "--work", "a.b_c-1"] {
+                    let command = remote_history_command(&remote, session);
+                    assert!(command.starts_with("/bin/sh -c 'exec 3<&0; echo "));
+                    assert!(command.ends_with("| /bin/sh -s'"));
+                    for banned in ['$', '`', '"'] {
+                        assert!(!command.contains(banned), "{banned} in {command}");
+                    }
+                    let script = String::from_utf8(
+                        base64::engine::general_purpose::STANDARD
+                            .decode(command.split_whitespace().nth(5).unwrap())
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        script,
+                        format!(
+                            "printf '\\n%s\\n' '{REMOTE_OUTPUT_READY_MARKER}'\nexec {} --session {session} history --stdio <&3",
+                            shell_quote(path)
+                        )
+                    );
+                    for banned in ["</dev/null", "server", "install", "remote-client-bridge"] {
+                        assert!(!script.contains(banned), "{banned} in {script}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn remote_history_command_uses_windows_streaming_without_server_or_install() {
+        for path in [
+            r"C:\Herdr Bin\herdr.exe",
+            r"C:\Users\O'Brien\Herdr $build`literal\herdr.exe",
+        ] {
+            let remote = RemoteHerdr::for_platform(RemotePlatform {
+                os: "windows",
+                arch: "x86_64",
+            })
+            .with_windows_path(path.into());
+            for session in ["default", "--work", "a.b_c-1"] {
+                let command = remote_history_command(&remote, session);
+                let script = decode_windows_command(&command);
+                assert!(script.contains(REMOTE_OUTPUT_READY_MARKER));
+                assert!(
+                    script.ends_with(&format!(
+                        "$process = Start-Process -FilePath {} -ArgumentList '--session {session} history --stdio' -NoNewWindow -PassThru -ErrorAction Stop; $null = $process.Handle; $process.WaitForExit(); exit $process.ExitCode",
+                        crate::platform::quote_powershell_arg(path)
+                    )),
+                    "{script}"
+                );
+                for banned in [
+                    "-RedirectStandardInput",
+                    "server",
+                    "install",
+                    "remote-client-bridge",
+                ] {
+                    assert!(!script.contains(banned), "{banned} in {script}");
+                }
+            }
+        }
     }
 
     #[test]

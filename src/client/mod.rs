@@ -31,6 +31,7 @@ mod image_files;
 mod input;
 mod loop_config;
 mod notifications;
+mod pi_history;
 mod session_switch;
 mod shell;
 mod shell_runtime;
@@ -677,6 +678,9 @@ async fn run_client_loop(
     let mut scheduled_activation = None;
     let mut pending_catalog: Option<Result<Vec<endpoint::SavedSshEndpoint>, String>> = None;
     let mut session_switch = session_switch::SessionSwitchCoordinator::default();
+    let (history_tx, mut history_rx) = tokio::sync::mpsc::channel(8);
+    let mut pi_history = pi_history::HistoryCoordinator::new(history_tx);
+    let mut prefer_history_event = false;
     if state.shell.is_some() && !is_remote_client && state.attach_escape.is_none() {
         catalog_reload::watch_profiles(event_tx.clone(), should_quit.clone());
     }
@@ -695,7 +699,7 @@ async fn run_client_loop(
     while !should_quit.load(Ordering::Acquire) {
         if let Some(options) = session_switch::connect_options(&state, config.endpoint_keybindings)
         {
-            session_switch.drive(&mut session_switch::SessionSwitchContext {
+            let mut context = session_switch::SessionSwitchContext {
                 state: &mut state,
                 endpoints: &mut write_stream,
                 commands: &mut endpoint_commands,
@@ -705,7 +709,10 @@ async fn run_client_loop(
                 next_surface_serial: &mut next_surface_serial,
                 event_tx: &event_tx,
                 options,
-            })?;
+            };
+            pi_history.drive(&mut session_switch, &mut context)?;
+            session_switch.drive(&mut context)?;
+            pi_history.drive(&mut session_switch, &mut context)?;
         }
         if pending_activation.is_none() && !session_switch.busy() {
             if let Some(reload) = pending_catalog.take() {
@@ -846,7 +853,7 @@ async fn run_client_loop(
                         ClientLoopEvent::Timer
                     }
                 },
-                ev = event_rx.recv() => ev.unwrap_or(ClientLoopEvent::Timer),
+                ev = events::receive_runtime_event(&mut event_rx, &mut history_rx, &mut prefer_history_event) => ev,
                 ev = supervisor_rx.recv() => ev.map(ClientLoopEvent::EndpointSupervisor).unwrap_or(ClientLoopEvent::Timer),
             }
         };
@@ -859,7 +866,7 @@ async fn run_client_loop(
                 ev = power_monitor.recv() => ClientLoopEvent::HostPower(ev),
                 _ = tokio::time::sleep_until(timer_deadline.into()) => ClientLoopEvent::Timer,
                 ev = supervisor_rx.recv() => ev.map(ClientLoopEvent::EndpointSupervisor).unwrap_or(ClientLoopEvent::Timer),
-                ev = event_rx.recv() => ev.unwrap_or(ClientLoopEvent::Timer),
+                ev = events::receive_runtime_event(&mut event_rx, &mut history_rx, &mut prefer_history_event) => ev,
             }
         };
         let now = std::time::Instant::now();
@@ -875,8 +882,9 @@ async fn run_client_loop(
                 }
             }
             event @ (ClientLoopEvent::EndpointCatalog(_)
-            | ClientLoopEvent::SessionActions(_)
-            | ClientLoopEvent::SessionSwitch(_)) => {
+            | ClientLoopEvent::ShellActions { .. }
+            | ClientLoopEvent::SessionSwitch(_)
+            | ClientLoopEvent::PiHistory(_)) => {
                 if let Some(options) =
                     session_switch::connect_options(&state, config.endpoint_keybindings)
                 {
@@ -894,12 +902,21 @@ async fn run_client_loop(
                     match event {
                         ClientLoopEvent::EndpointCatalog(reload) => {
                             if let Ok(profiles) = &reload {
+                                pi_history.catalog_changed(
+                                    profiles,
+                                    &mut session_switch,
+                                    &mut context,
+                                )?;
                                 session_switch.catalog_changed(profiles, &mut context);
                             }
                             pending_catalog = Some(reload);
                         }
-                        ClientLoopEvent::SessionActions(actions) => {
-                            session_switch.actions(actions, &mut context)?
+                        ClientLoopEvent::ShellActions { sessions, history } => {
+                            pi_history.actions(history, &mut session_switch, &mut context)?;
+                            session_switch.actions(sessions, &mut context)?;
+                        }
+                        ClientLoopEvent::PiHistory(event) => {
+                            pi_history.receive(event, &mut session_switch, &mut context)?;
                         }
                         ClientLoopEvent::SessionSwitch(event) => {
                             session_switch.receive(event, &mut context)?
@@ -1998,6 +2015,28 @@ async fn run_client_loop(
                         let Some(completed) = completed else {
                             continue;
                         };
+                        if pi_history::HistoryCoordinator::is_focus_result(&completed) {
+                            if let Some(options) =
+                                session_switch::connect_options(&state, config.endpoint_keybindings)
+                            {
+                                pi_history.receive_focus_result(
+                                    completed,
+                                    &mut session_switch,
+                                    &mut session_switch::SessionSwitchContext {
+                                        state: &mut state,
+                                        endpoints: &mut write_stream,
+                                        commands: &mut endpoint_commands,
+                                        supervisors: &mut supervisors,
+                                        catalog: &mut endpoint_catalog,
+                                        activation: &mut pending_activation,
+                                        next_surface_serial: &mut next_surface_serial,
+                                        event_tx: &event_tx,
+                                        options,
+                                    },
+                                )?;
+                            }
+                            continue;
+                        }
                         if session_switch::SessionSwitchCoordinator::is_transfer_result(&completed)
                         {
                             if let Some(options) =
@@ -2422,7 +2461,29 @@ async fn run_client_loop(
                         .collect::<Vec<_>>();
                     let mut shell_expired = Vec::new();
                     for expired in expired_endpoints {
-                        if session_switch::SessionSwitchCoordinator::is_transfer_result(&expired) {
+                        if pi_history::HistoryCoordinator::is_focus_result(&expired) {
+                            if let Some(options) =
+                                session_switch::connect_options(&state, config.endpoint_keybindings)
+                            {
+                                pi_history.receive_focus_result(
+                                    expired,
+                                    &mut session_switch,
+                                    &mut session_switch::SessionSwitchContext {
+                                        state: &mut state,
+                                        endpoints: &mut write_stream,
+                                        commands: &mut endpoint_commands,
+                                        supervisors: &mut supervisors,
+                                        catalog: &mut endpoint_catalog,
+                                        activation: &mut pending_activation,
+                                        next_surface_serial: &mut next_surface_serial,
+                                        event_tx: &event_tx,
+                                        options,
+                                    },
+                                )?;
+                            }
+                        } else if session_switch::SessionSwitchCoordinator::is_transfer_result(
+                            &expired,
+                        ) {
                             if let Some(options) =
                                 session_switch::connect_options(&state, config.endpoint_keybindings)
                             {

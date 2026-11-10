@@ -59,6 +59,78 @@ pub(crate) fn connect_saved_ssh(
     })
 }
 
+pub(crate) fn connect_saved_existing_ssh(
+    profile_id: &str,
+    target: &str,
+    session: &str,
+    cancelled: Arc<AtomicBool>,
+) -> io::Result<SavedSshStream> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(super::process::cancelled());
+    }
+    let mut ssh = validated_saved_ssh(profile_id, target, session)?;
+    ssh.cancelled = Arc::clone(&cancelled);
+    let remote_herdr = find_installed_remote_herdr(&ssh)?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err(super::process::cancelled());
+    }
+    let command = super::attach::remote_existing_client_bridge_command(&remote_herdr, session);
+    let path = saved_bridge_path(profile_id, "existing-client");
+    let bridge = SshStdioBridge::start_command(
+        target.to_owned(),
+        command,
+        path.clone(),
+        ssh.options(),
+        true,
+        Arc::clone(&cancelled),
+    )?;
+    let stream = crate::ipc::connect_local_stream_cancellable(
+        &path,
+        &cancelled,
+        Instant::now() + Duration::from_secs(5),
+    )?;
+    Ok(SavedSshStream {
+        stream,
+        bridge: SavedSshBridge { _bridge: bridge },
+    })
+}
+
+pub(crate) fn connect_saved_history(
+    profile_id: &str,
+    target: &str,
+    session: &str,
+    cancelled: Arc<AtomicBool>,
+) -> io::Result<SavedSshStream> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(super::process::cancelled());
+    }
+    let mut ssh = validated_saved_ssh(profile_id, target, session)?;
+    ssh.cancelled = Arc::clone(&cancelled);
+    let remote_herdr = find_installed_remote_herdr(&ssh)?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err(super::process::cancelled());
+    }
+    let command = super::attach::remote_history_command(&remote_herdr, session);
+    let path = saved_bridge_path(profile_id, "history");
+    let bridge = SshStdioBridge::start_command(
+        target.to_owned(),
+        command,
+        path.clone(),
+        ssh.options(),
+        true,
+        Arc::clone(&cancelled),
+    )?;
+    let stream = crate::ipc::connect_local_stream_cancellable(
+        &path,
+        &cancelled,
+        Instant::now() + Duration::from_secs(5),
+    )?;
+    Ok(SavedSshStream {
+        stream,
+        bridge: SavedSshBridge { _bridge: bridge },
+    })
+}
+
 pub(crate) fn list_saved_sessions(
     profile_id: &str,
     target: &str,
@@ -248,10 +320,12 @@ mod tests {
                 [
                     saved_bridge_path(profile, "client"),
                     saved_bridge_path(profile, "api"),
+                    saved_bridge_path(profile, "history"),
+                    saved_bridge_path(profile, "existing-client"),
                 ]
             })
             .collect::<std::collections::HashSet<_>>();
-        assert_eq!(paths.len(), 64);
+        assert_eq!(paths.len(), 128);
         assert!(paths.iter().all(|path| {
             path.file_name()
                 .unwrap()
@@ -275,6 +349,46 @@ mod tests {
     }
 
     #[test]
+    fn saved_existing_ssh_rejects_cancellation_before_validation_or_ssh_setup() {
+        for (profile, target, session) in [
+            (
+                "0123456789abcdef0123456789abcdef",
+                "unused.invalid",
+                "default",
+            ),
+            ("invalid", "-option", "../other"),
+        ] {
+            let error = connect_saved_existing_ssh(
+                profile,
+                target,
+                session,
+                Arc::new(AtomicBool::new(true)),
+            )
+            .err()
+            .expect("cancelled existing SSH connection");
+            assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+        }
+    }
+
+    #[test]
+    fn saved_history_rejects_cancellation_before_validation_or_ssh_setup() {
+        for (profile, target, session) in [
+            (
+                "0123456789abcdef0123456789abcdef",
+                "unused.invalid",
+                "default",
+            ),
+            ("invalid", "-option", "../other"),
+        ] {
+            let error =
+                connect_saved_history(profile, target, session, Arc::new(AtomicBool::new(true)))
+                    .err()
+                    .expect("cancelled history connection");
+            assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+        }
+    }
+
+    #[test]
     fn saved_session_operations_validate_names_targets_and_profile_ids() {
         for (profile, target, session) in [
             ("short", "unused.invalid", "default"),
@@ -294,6 +408,20 @@ mod tests {
                 connect_saved_ssh(profile, target, session, Arc::new(AtomicBool::new(false)))
                     .err()
                     .expect("invalid saved connection target");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            let error = connect_saved_existing_ssh(
+                profile,
+                target,
+                session,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .err()
+            .expect("invalid existing SSH connection target");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            let error =
+                connect_saved_history(profile, target, session, Arc::new(AtomicBool::new(false)))
+                    .err()
+                    .expect("invalid history connection target");
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         }
     }

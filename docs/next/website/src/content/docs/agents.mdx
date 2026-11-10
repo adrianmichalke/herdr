@@ -128,6 +128,20 @@ A blocked agent makes its pane, tab, and workspace look blocked. A working agent
 
 This is the main Herdr workflow: start several agents, let them work in parallel, and use the sidebar to see which project needs a decision, which one is still running, and which one is ready to review.
 
+## Search saved Pi histories
+
+Press **Ctrl+F** in the main view to search Pi conversations associated with Herdr panes on the selected machine. Current space is the default scope; switch to Current session or All sessions to include other spaces and stopped Herdr sessions. Search is case-insensitive literal text, not a regular expression. Repeated references to one Pi history file are grouped, with their session, space, tab and pane locations retained.
+
+Herdr reads the raw saved JSONL history, including original messages from before compaction and inactive branches. It does not change Pi's branch, context or session file, send terminal input, invoke Pi, or make model requests. Readable message, tool, reasoning and summary text is searchable; images, signatures and opaque extension state are not.
+
+Select a match or press Enter to open a read-only transcript preview at that entry. Use the page and hit controls to browse. **Focus running** is a separate action that validates the current pane and conversation. **Open session** is an explicit action for a stopped session and may restore its processes normally. Merely searching or previewing never starts a stopped session.
+
+Search runs in cancellable background helpers, locally or over the selected machine's existing noninteractive SSH transport. Query/scope changes and closing the dialog cancel obsolete work. Older remote binaries or running servers without the required history methods report unavailable support rather than being upgraded or restarted automatically.
+
+Coverage is the native Pi session-file references currently recorded in live or saved Herdr panes, not an archive of closed/deleted panes or every Pi session directory. Missing files, ID-only references, unsupported formats and unreadable metadata are reported without failing other sources. Growing histories are read only to their captured length. Oversized or malformed records and result/discovery limits produce an explicit partial-coverage notice; refine the query or scope when a result limit is reached. Large history files are streamed rather than limited to a fixed initial file prefix.
+
+Preview text is bounded around its selected entry and controls are displayed as safe text. No search index or conversation copy is written. See [Keyboard](/docs/keyboard/#saved-pi-history) for controls and how to remap or disable `keys.history_search` so Ctrl+F is forwarded to Vim or a shell.
+
 ## Custom agent labels
 
 You can rename an agent target for display:

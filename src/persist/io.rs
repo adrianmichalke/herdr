@@ -91,6 +91,45 @@ pub fn clear_history() {
     }
 }
 
+pub(crate) fn load_from_path(path: &Path) -> std::io::Result<SessionSnapshot> {
+    use std::io::Read;
+
+    const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() || metadata.len() > MAX_SNAPSHOT_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "saved session is not a regular file or exceeds the metadata size limit",
+        ));
+    }
+    let file = std::fs::File::open(path)?;
+    let initial = file.metadata()?;
+    if !initial.is_file() || initial.len() > MAX_SNAPSHOT_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "saved session is not a regular file or exceeds the metadata size limit",
+        ));
+    }
+    let mut content = String::new();
+    (&file).take(initial.len()).read_to_string(&mut content)?;
+    let final_metadata = file.metadata()?;
+    let current_path = std::fs::metadata(path)?;
+    if content.len() as u64 != initial.len()
+        || initial.len() != final_metadata.len()
+        || initial.modified().ok() != final_metadata.modified().ok()
+        || initial.len() != current_path.len()
+        || initial.modified().ok() != current_path.modified().ok()
+        || initial.created().ok() != current_path.created().ok()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "saved session changed while its metadata was read",
+        ));
+    }
+    parse_snapshot(&content)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
 pub fn load() -> Option<SessionSnapshot> {
     let path = session_path();
     let content = match std::fs::read_to_string(&path) {

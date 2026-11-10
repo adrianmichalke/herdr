@@ -35,6 +35,7 @@ pub(crate) struct OverlayRender {
     pub(crate) release_notes_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(crate) release_notes_max_scroll: usize,
     pub(crate) cursor: Option<crate::protocol::CursorState>,
+    pub(in crate::client::shell) history: super::super::history::HistoryHitMap,
 }
 
 pub(crate) fn render_client_overlay(
@@ -67,6 +68,7 @@ pub(crate) fn render_client_overlay(
         }
         ClientShellOverlay::SessionPicker(v) => render_session_picker_overlay(b, v, p),
         ClientShellOverlay::TabMove(v) => render_tab_move_overlay(b, v, p),
+        ClientShellOverlay::PiHistory(v) => super::super::history::render_history_overlay(b, v, p),
         ClientShellOverlay::Rename(v) => render_rename_overlay(b, v, p),
         ClientShellOverlay::ConfirmClose(v) => render_confirm_close_overlay(b, v, p),
         ClientShellOverlay::Help(v) => render_help_overlay(b, v, k, p),

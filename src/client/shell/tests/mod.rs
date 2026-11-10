@@ -90,7 +90,7 @@ fn worktree_list_result(open_workspace_id: Option<&str>) -> crate::api::schema::
     }
 }
 
-fn surface() -> PaneSurfaceFrame {
+pub(super) fn surface() -> PaneSurfaceFrame {
     let surface_buffer = Buffer::with_lines(["LIVE", "PANE"]);
     PaneSurfaceFrame {
         boot_id: "boot-1".into(),
@@ -221,7 +221,7 @@ fn copy_search_result(
     }
 }
 
-fn surface_with_popup() -> PaneSurfaceFrame {
+pub(super) fn surface_with_popup() -> PaneSurfaceFrame {
     let mut surface = surface();
     let popup_buffer = Buffer::with_lines(["popup-live", "", ""]);
     surface.popup = Some(Box::new(crate::protocol::ClientShellPopupSurface {

@@ -187,6 +187,7 @@ impl Config {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn keybindings_from_profile_toml(profile: &str) -> Result<LiveKeybindConfig, String> {
     let config = toml::from_str::<Config>(profile)
         .map_err(|err| format!("invalid keybinding profile: {err}"))?;

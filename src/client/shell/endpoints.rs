@@ -233,6 +233,7 @@ impl ClientShellState {
             });
         self.reset_endpoint_projection();
         self.active_endpoint_id = local;
+        self.reconcile_history_machine();
         self.mode = ClientShellMode::Terminal;
         self.snapshot = None;
         self.graphics.set_scope("local:unavailable");
@@ -383,6 +384,7 @@ impl ClientShellState {
             self.graphics
                 .set_scope(&format!("{}:switching", endpoint_id.storage_key()));
             self.active_endpoint_id = endpoint_id.clone();
+            self.reconcile_history_machine();
         }
         self.apply_active_snapshot(snapshot, generation);
         if switching_endpoint {

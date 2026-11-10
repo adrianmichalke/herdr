@@ -13,6 +13,7 @@ mod snapshot;
 pub(crate) mod workspace_transfer;
 mod writer;
 
+pub(crate) use self::io::load_from_path;
 pub use self::io::{clear_history, load, load_history};
 pub use self::pane_aliases::PaneAliasesSnapshot;
 pub(crate) use self::pane_aliases::{reserve_pane_alias_namespaces, RestoredPaneAliases};

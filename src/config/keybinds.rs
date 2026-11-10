@@ -361,6 +361,7 @@ pub struct Keybinds {
     pub close_workspace: ActionKeybinds,
     pub workspace_picker: ActionKeybinds,
     pub goto: ActionKeybinds,
+    pub history_search: ActionKeybinds,
     pub detach: ActionKeybinds,
     pub reload_config: ActionKeybinds,
     pub open_notification_target: ActionKeybinds,
@@ -544,6 +545,7 @@ impl Config {
             close_workspace: empty_action!(),
             workspace_picker: empty_action!(),
             goto: empty_action!(),
+            history_search: empty_action!(),
             detach: empty_action!(),
             reload_config: empty_action!(),
             open_notification_target: empty_action!(),
@@ -673,6 +675,7 @@ impl Config {
             apply_action!(keybinds.close_workspace, close_workspace, source);
             apply_action!(keybinds.workspace_picker, workspace_picker, source);
             apply_action!(keybinds.goto, goto, source);
+            apply_action!(keybinds.history_search, history_search, source);
             apply_action!(keybinds.detach, detach, source);
             apply_action!(keybinds.reload_config, reload_config, source);
             apply_action!(
@@ -1673,6 +1676,68 @@ next_tab = "prefix+n"
                 KeyModifiers::SHIFT
             ))]
         );
+    }
+
+    #[test]
+    fn history_search_defaults_remaps_disables_and_preserves_profile_bindings() {
+        let defaults = Config::default().keybinds();
+        assert_eq!(defaults.history_search.label().as_deref(), Some("ctrl+f"));
+        for binding in ["\"\"", "[]", "\"alt+f\"", "[\"alt+f\", \"prefix+f\"]"] {
+            let config: Config =
+                toml::from_str(&format!("[keys]\nhistory_search = {binding}\n")).unwrap();
+            let original = config.keybinds().history_search;
+            let profile = config.local_keybindings_profile_toml().unwrap();
+            let restored = crate::config::keybindings_from_profile_toml(&profile).unwrap();
+            assert_eq!(original, restored.keybinds.history_search);
+            if binding == "\"\"" || binding == "[]" {
+                assert!(original.bindings.is_empty());
+            } else {
+                assert!(original.labels().contains(&"alt+f".to_owned()));
+                assert!(!original.labels().contains(&"ctrl+f".to_owned()));
+            }
+        }
+        let old =
+            crate::config::keybindings_from_profile_toml("[keys]\ngoto = \"prefix+g\"\n").unwrap();
+        assert_eq!(
+            old.keybinds.history_search.label().as_deref(),
+            Some("ctrl+f")
+        );
+    }
+
+    #[test]
+    fn history_search_uses_existing_collision_prefix_and_printable_safety_rules() {
+        for text in [
+            "[keys]\nnew_tab = \"ctrl+f\"\n",
+            "[keys]\nprefix = \"ctrl+f\"\n",
+            "[keys]\nhelp = \"ctrl+f\"\nhistory_search = \"ctrl+f\"\n",
+            "[keys]\nhistory_search = \"f\"\n",
+        ] {
+            let config: Config = toml::from_str(text).unwrap();
+            let (resolved, diagnostics) = config.live_keybinds_with_diagnostics().unwrap();
+            assert!(
+                resolved.keybinds.history_search.bindings.is_empty(),
+                "{text}"
+            );
+            if text.contains("history_search =") {
+                assert!(
+                    diagnostics
+                        .iter()
+                        .any(|diagnostic| diagnostic.contains("history_search")),
+                    "{diagnostics:?}"
+                );
+            }
+        }
+        let config: Config =
+            toml::from_str("[keys]\nhistory_search = \"ctrl+f\"\nnew_tab = \"ctrl+f\"\n").unwrap();
+        let (resolved, diagnostics) = config.live_keybinds_with_diagnostics().unwrap();
+        assert_eq!(
+            resolved.keybinds.history_search.label().as_deref(),
+            Some("ctrl+f")
+        );
+        assert!(resolved.keybinds.new_tab.bindings.is_empty());
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("keys.new_tab")));
     }
 
     #[test]

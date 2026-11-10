@@ -58,6 +58,7 @@ Workspaces and session:
 | Rename workspace | `prefix+shift+w` |
 | Close workspace | `prefix+shift+d` |
 | Goto picker | `prefix+g` |
+| Search saved Pi history | `ctrl+f` |
 | Toggle sidebar | `prefix+b` |
 
 The full keymap and the binding syntax live in the [keybinding reference](/docs/configuration/#keybindings).
@@ -69,6 +70,32 @@ Press Esc or Ctrl+[ to leave workspace navigation. In the Go To picker, `/` also
 Pane input follows the keyboard modes requested by the app. Plain shells receive Ctrl+Shift+letter as its control byte; Super, Hyper, and Meta chords are dropped when the pane cannot represent them. Apps using Kitty keyboard input receive the modifiers and key events they request. Without report-all mode, modified Enter, Tab, and Backspace do not receive release reports. Keypad keys and modifier-only presses are not forwarded.
 
 On non-Latin layouts, Ctrl-only shortcuts such as Ctrl+W can use the physical base key reported by a Kitty-capable host. Latin layout characters, Ctrl+Shift chords, and AltGr keep their layout meaning. Terminals that do not report physical keys cannot provide the same layout-independent shortcuts.
+
+## Saved Pi history
+
+Press `ctrl+f` in the main terminal view, workspace navigation, or resize mode to search saved Pi conversations on the selected machine. The shortcut does not take input from dialogs, terminal popups, or copy mode; `ctrl+f` still pages forward in copy mode. The query supports the text-field editing shortcuts below, committed IME text, and text paste. Image paste is blocked throughout the history dialog.
+
+Search starts in **Current space**, capturing the selected workspace and its committed Herdr session. Choose **Current session** or **All sessions**, or press `ctrl+1`, `ctrl+2`, or `ctrl+3`, to broaden the scope on that same machine. Queries are case-insensitive literal text, not regular expressions. Results group matches by saved Pi conversation and retain every recorded Herdr session, workspace, tab, and pane location. Progress, unavailable sources, and truncation warnings describe partial coverage; no match does not mean every source was readable.
+
+Use Up/Down to select a hit, then Enter or a row click to preview its saved transcript at the matching entry. Preview is read-only: selection never focuses a pane, opens a session, types into a terminal, or contacts an LLM. Use the wheel, Up/Down, PageUp/PageDown, Home/End, or the scrollbar to scroll wrapped text. `n` / `N` (also `ctrl+n` / `ctrl+p`) visit the next/previous hit. `[` / `]` or Left/Right request the previous/next bounded transcript window. Esc goes back to the results; Esc again or the close button closes the dialog. `F5` retries a failed search or preview.
+
+Navigation is a separate explicit action. In preview, Tab / Shift+Tab choose among recorded locations. **Focus running** (`ctrl+g`) requests a refreshed, conditional focus for the chosen running location. **Open session** (`ctrl+o`) explicitly opens the chosen stopped Herdr session before conditional focus; it is not a request to resume the native Pi conversation. A stale or unavailable destination reports an error in the dialog instead of focusing a similarly named pane. Changing the query or scope, leaving a preview, or closing the dialog cancels its outstanding work.
+
+To forward Ctrl+F to Vim, a shell, or another pane application, disable the history binding:
+
+```toml
+[keys]
+history_search = ""
+```
+
+Or remap it, for example to a prefix shortcut:
+
+```toml
+[keys]
+history_search = "prefix+f"
+```
+
+Like other bindings, `keys.history_search` accepts multiple shortcuts or an empty array, participates in collision diagnostics, and appears with its effective shortcut in keybinding help.
 
 ## Editing text fields
 
