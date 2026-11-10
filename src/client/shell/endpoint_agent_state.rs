@@ -7,6 +7,7 @@ use crate::protocol::{ClientShellAgent, ClientShellSnapshot, PaneSurfaceFrame};
 pub(super) struct EndpointAgentPresentation {
     boot_id: Option<String>,
     acknowledged: HashMap<String, u64>,
+    manually_unseen: HashMap<String, u64>,
     completed: HashMap<String, u64>,
     working: HashSet<String>,
     activity_times: HashMap<String, (u64, Option<String>)>,
@@ -49,6 +50,7 @@ impl EndpointAgentPresentation {
         if self.boot_id.as_deref() != Some(snapshot.boot_id.as_str()) {
             self.boot_id = Some(snapshot.boot_id.clone());
             self.acknowledged.clear();
+            self.manually_unseen.clear();
             self.completed.clear();
             self.working.clear();
             self.acknowledged.extend(
@@ -64,6 +66,8 @@ impl EndpointAgentPresentation {
             .map(|agent| agent.pane_id.as_str())
             .collect();
         self.acknowledged
+            .retain(|pane_id, _| pane_ids.contains(pane_id.as_str()));
+        self.manually_unseen
             .retain(|pane_id, _| pane_ids.contains(pane_id.as_str()));
         self.completed
             .retain(|pane_id, _| pane_ids.contains(pane_id.as_str()));
@@ -83,6 +87,14 @@ impl EndpointAgentPresentation {
             .map(|projection| &projection.completions);
         self.project_activity_times(snapshot, projection.as_ref());
         for agent in &mut snapshot.agents {
+            if !matches!(agent.agent_status, AgentStatus::Idle | AgentStatus::Done)
+                || self
+                    .manually_unseen
+                    .get(&agent.pane_id)
+                    .is_some_and(|sequence| *sequence != agent.state_change_seq)
+            {
+                self.manually_unseen.remove(&agent.pane_id);
+            }
             match agent.agent_status {
                 AgentStatus::Working => {
                     self.working.insert(agent.pane_id.clone());
@@ -158,6 +170,32 @@ impl EndpointAgentPresentation {
         }
     }
 
+    pub(super) fn mark_unseen(
+        &mut self,
+        snapshot: &mut ClientShellSnapshot,
+        pane_id: &str,
+    ) -> bool {
+        if self.boot_id.as_deref() != Some(snapshot.boot_id.as_str()) {
+            return false;
+        }
+        let Some(agent) = snapshot
+            .agents
+            .iter_mut()
+            .find(|agent| agent.pane_id == pane_id)
+        else {
+            return false;
+        };
+        if !matches!(agent.agent_status, AgentStatus::Idle | AgentStatus::Done) || !self.seen(agent)
+        {
+            return false;
+        }
+        self.manually_unseen
+            .insert(agent.pane_id.clone(), agent.state_change_seq);
+        agent.agent_status = AgentStatus::Done;
+        project_aggregate_status(snapshot);
+        true
+    }
+
     pub(super) fn acknowledge_surface(
         &mut self,
         snapshot: &mut ClientShellSnapshot,
@@ -181,6 +219,7 @@ impl EndpointAgentPresentation {
             else {
                 continue;
             };
+            changed |= self.manually_unseen.remove(&agent.pane_id).is_some();
             let acknowledged = self.acknowledged.entry(agent.pane_id.clone()).or_default();
             if *acknowledged < agent.state_change_seq {
                 *acknowledged = agent.state_change_seq;
@@ -196,7 +235,22 @@ impl EndpointAgentPresentation {
         changed
     }
 
+    pub(super) fn marked_unseen(&self, agent: &ClientShellAgent) -> bool {
+        self.manually_unseen.get(&agent.pane_id) == Some(&agent.state_change_seq)
+    }
+
+    pub(super) fn has_marked_surface(&self, surface: &PaneSurfaceFrame) -> bool {
+        !self.manually_unseen.is_empty()
+            && surface
+                .panes
+                .iter()
+                .any(|pane| self.manually_unseen.contains_key(&pane.pane_id))
+    }
+
     pub(super) fn seen(&self, agent: &ClientShellAgent) -> bool {
+        if self.marked_unseen(agent) {
+            return false;
+        }
         self.completed.get(&agent.pane_id).is_none_or(|completion| {
             self.acknowledged
                 .get(&agent.pane_id)
@@ -324,6 +378,112 @@ mod tests {
             popup: None,
             graphics: Default::default(),
         }
+    }
+
+    #[test]
+    fn mark_unseen_preserves_completion_evidence_and_acknowledges_equal_sequences() {
+        for sequence in [0, 4, u64::MAX] {
+            let mut presentation = EndpointAgentPresentation::default();
+            let mut projected = snapshot(AgentStatus::Idle, sequence, 1);
+            presentation.project_snapshot(&mut projected);
+            let acknowledged = presentation.acknowledged.clone();
+            let completed = presentation.completed.clone();
+            let activity = presentation.activity_times.clone();
+
+            assert!(presentation.mark_unseen(&mut projected, "agent-pane"));
+            assert!(!presentation.mark_unseen(&mut projected, "agent-pane"));
+            assert_eq!(projected.agents[0].agent_status, AgentStatus::Done);
+            assert_eq!(presentation.acknowledged, acknowledged);
+            assert_eq!(presentation.completed, completed);
+            assert_eq!(presentation.activity_times, activity);
+            assert_eq!(projected.agents[0].state_change_seq, sequence);
+
+            presentation.receive_completions(None, completions("endpoint-boot", 2, None));
+            let mut refreshed = snapshot(AgentStatus::Idle, sequence, 2);
+            presentation.project_snapshot(&mut refreshed);
+            assert_eq!(refreshed.agents[0].agent_status, AgentStatus::Done);
+            assert!(!presentation.acknowledge_surface(&mut refreshed, &surface(1), Some(true)));
+            assert!(!presentation.acknowledge_surface(&mut refreshed, &surface(2), Some(false)));
+            assert_eq!(refreshed.agents[0].agent_status, AgentStatus::Done);
+            assert!(presentation.acknowledge_surface(&mut refreshed, &surface(2), Some(true)));
+            assert_eq!(refreshed.agents[0].agent_status, AgentStatus::Idle);
+            assert!(presentation.manually_unseen.is_empty());
+            assert_eq!(presentation.acknowledged, acknowledged);
+        }
+    }
+
+    #[test]
+    fn mark_unseen_reuses_a_viewed_completion_without_manufacturing_another() {
+        let mut presentation = EndpointAgentPresentation::default();
+        let mut working = snapshot(AgentStatus::Working, 4, 1);
+        presentation.project_snapshot(&mut working);
+        let mut finished = snapshot(AgentStatus::Idle, 5, 2);
+        presentation.project_snapshot(&mut finished);
+        assert_eq!(finished.agents[0].agent_status, AgentStatus::Done);
+        assert!(!presentation.mark_unseen(&mut finished, "agent-pane"));
+        assert!(presentation.manually_unseen.is_empty());
+        assert!(presentation.acknowledge_surface(&mut finished, &surface(2), Some(true)));
+        assert!(presentation.mark_unseen(&mut finished, "agent-pane"));
+        assert_eq!(presentation.completed["agent-pane"], 5);
+        assert_eq!(presentation.acknowledged["agent-pane"], 5);
+        assert_eq!(finished.agents[0].state_change_seq, 5);
+        assert_eq!(finished.agents[0].agent_status, AgentStatus::Done);
+    }
+
+    #[test]
+    fn mark_unseen_is_scoped_to_a_client_and_the_current_idle_lifecycle() {
+        let mut first = EndpointAgentPresentation::default();
+        let mut second = EndpointAgentPresentation::default();
+        let mut first_snapshot = snapshot(AgentStatus::Idle, 4, 1);
+        let mut second_snapshot = first_snapshot.clone();
+        first.project_snapshot(&mut first_snapshot);
+        second.project_snapshot(&mut second_snapshot);
+        assert!(first.mark_unseen(&mut first_snapshot, "agent-pane"));
+        assert!(!first.seen(&first_snapshot.agents[0]));
+        assert!(second.seen(&second_snapshot.agents[0]));
+        assert_eq!(second_snapshot.agents[0].agent_status, AgentStatus::Idle);
+
+        for (status, sequence) in [
+            (AgentStatus::Working, 4),
+            (AgentStatus::Blocked, 4),
+            (AgentStatus::Unknown, 4),
+            (AgentStatus::Idle, 5),
+        ] {
+            let mut presentation = first.clone();
+            let mut changed = snapshot(status, sequence, 2);
+            presentation.project_snapshot(&mut changed);
+            assert!(presentation.manually_unseen.is_empty());
+            assert_eq!(changed.agents[0].agent_status, status);
+            if status != AgentStatus::Idle {
+                assert!(!presentation.mark_unseen(&mut changed, "agent-pane"));
+            }
+        }
+    }
+
+    #[test]
+    fn mark_unseen_does_not_survive_a_removed_agent_or_a_new_boot() {
+        for new_boot in [false, true] {
+            let mut presentation = EndpointAgentPresentation::default();
+            let mut initial = snapshot(AgentStatus::Idle, 4, 1);
+            presentation.project_snapshot(&mut initial);
+            assert!(presentation.mark_unseen(&mut initial, "agent-pane"));
+            let mut changed = snapshot(AgentStatus::Idle, 4, 2);
+            if new_boot {
+                changed.boot_id = "replacement-boot".into();
+            } else {
+                changed.agents.clear();
+            }
+            presentation.project_snapshot(&mut changed);
+            assert!(presentation.manually_unseen.is_empty());
+            if new_boot {
+                assert_eq!(changed.agents[0].agent_status, AgentStatus::Idle);
+            }
+        }
+        let mut presentation = EndpointAgentPresentation::default();
+        let mut unknown = snapshot(AgentStatus::Idle, 4, 1);
+        assert!(!presentation.mark_unseen(&mut unknown, "agent-pane"));
+        presentation.project_snapshot(&mut unknown);
+        assert!(!presentation.mark_unseen(&mut unknown, "missing-pane"));
     }
 
     #[test]

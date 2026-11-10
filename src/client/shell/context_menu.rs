@@ -1,4 +1,5 @@
 use super::*;
+use crate::api::schema::AgentStatus;
 
 impl ClientContextMenuOverlay {
     pub(super) fn items(&self) -> Vec<ClientContextMenuItem> {
@@ -6,6 +7,7 @@ impl ClientContextMenuOverlay {
 
         let item = |label, action| ClientContextMenuItem { label, action };
         let mut items = match &self.target {
+            ClientContextMenuTarget::Agent { .. } => vec![item("Mark unseen", Action::MarkUnseen)],
             ClientContextMenuTarget::Machine { .. } => vec![item("Sessions...", Action::Sessions)],
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
                 vec![item("Rename", Action::Rename), item("Close", Action::Close)]
@@ -104,6 +106,76 @@ impl ClientContextMenuOverlay {
 }
 
 impl ClientShellState {
+    pub(super) fn open_agent_context_menu(
+        &mut self,
+        endpoint_id: ClientEndpointId,
+        pane_id: String,
+        x: u16,
+        y: u16,
+    ) {
+        let Some(snapshot) = self
+            .endpoints
+            .iter()
+            .find(|endpoint| {
+                endpoint.endpoint_id == endpoint_id
+                    && endpoint.status == ClientEndpointStatus::Online
+                    && !endpoint.session_hidden
+            })
+            .and_then(|endpoint| endpoint.snapshot.as_deref())
+        else {
+            return;
+        };
+        let Some(agent) = snapshot.agents.iter().find(|agent| {
+            agent.pane_id == pane_id
+                && matches!(agent.agent_status, AgentStatus::Idle | AgentStatus::Done)
+        }) else {
+            return;
+        };
+        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::Agent {
+                endpoint_id,
+                boot_id: snapshot.boot_id.clone(),
+                pane_id,
+                state_change_seq: agent.state_change_seq,
+            },
+            x,
+            y,
+            highlighted: 0,
+        }));
+    }
+
+    fn mark_agent_unseen(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        boot_id: &str,
+        pane_id: &str,
+        state_change_seq: u64,
+    ) {
+        let Some(endpoint) = self.endpoints.iter_mut().find(|endpoint| {
+            &endpoint.endpoint_id == endpoint_id
+                && endpoint.status == ClientEndpointStatus::Online
+                && !endpoint.session_hidden
+        }) else {
+            return;
+        };
+        let Some(snapshot) = endpoint.snapshot.as_deref_mut() else {
+            return;
+        };
+        if snapshot.boot_id != boot_id
+            || !snapshot
+                .agents
+                .iter()
+                .any(|agent| agent.pane_id == pane_id && agent.state_change_seq == state_change_seq)
+        {
+            return;
+        }
+        if endpoint.agent_presentation.mark_unseen(snapshot, pane_id)
+            && endpoint_id == &self.active_endpoint_id
+        {
+            self.snapshot = endpoint.snapshot.clone();
+        }
+    }
+
     pub(super) fn open_machine_context_menu(
         &mut self,
         endpoint_id: ClientEndpointId,
@@ -232,6 +304,16 @@ impl ClientShellState {
             return;
         };
         match menu.target {
+            ClientContextMenuTarget::Agent {
+                endpoint_id,
+                boot_id,
+                pane_id,
+                state_change_seq,
+            } => {
+                if action == ClientContextMenuAction::MarkUnseen {
+                    self.mark_agent_unseen(&endpoint_id, &boot_id, &pane_id, state_change_seq);
+                }
+            }
             ClientContextMenuTarget::Machine { endpoint_id } => {
                 if action == ClientContextMenuAction::Sessions {
                     self.open_machine_session_picker(&endpoint_id, outcome);
