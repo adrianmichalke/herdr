@@ -142,6 +142,7 @@ fn agent_rows(
                 snapshot
                     .agents
                     .iter()
+                    .filter(|agent| !endpoint.done_tabs.contains(&agent.tab_id))
                     .filter_map(|agent| {
                         super::agent_sidebar::agent_row(
                             snapshot,

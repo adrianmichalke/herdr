@@ -11,6 +11,7 @@ pub(super) struct CachedEndpointSnapshot<'a> {
     pub(super) status: ClientEndpointStatus,
     pub(super) snapshot: &'a ClientShellSnapshot,
     pub(super) agent_recency: &'a HashMap<String, u64>,
+    pub(super) done_tabs: &'a HashSet<String>,
     pub(super) agent_presentation: &'a super::endpoint_agent_state::EndpointAgentPresentation,
 }
 
@@ -38,6 +39,7 @@ pub(super) fn cached_endpoint_snapshots(
                     status: endpoint.status,
                     snapshot,
                     agent_recency: &endpoint.agent_recency,
+                    done_tabs: &endpoint.done_tabs,
                     agent_presentation: &endpoint.agent_presentation,
                 })
         })
@@ -88,6 +90,7 @@ pub(super) fn aggregate_agent_rows<'a>(
                     .snapshot
                     .agents
                     .iter()
+                    .filter(move |agent| !endpoint.done_tabs.contains(&agent.tab_id))
                     .map(move |agent| AggregateAgentRow {
                         recency: endpoint
                             .agent_recency
@@ -137,6 +140,7 @@ pub(super) fn aggregate_agent_rows<'a>(
                 endpoint.snapshot,
                 sort,
                 Some(endpoint.agent_recency),
+                Some(endpoint.done_tabs),
             )
             .into_iter()
             .filter_map(move |pane_id| {

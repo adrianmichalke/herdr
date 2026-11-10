@@ -405,7 +405,8 @@ fn equal_sequences_keep_existing_observation_order_without_lexical_ids() {
         crate::client::shell::agent_sidebar::ordered_agent_pane_ids(
             &snapshot,
             crate::config::AgentPanelSortConfig::Spaces,
-            Some(&ranks)
+            Some(&ranks),
+            None
         ),
         ["ws_1:p9", "ws_1:p2"]
     );
@@ -413,7 +414,8 @@ fn equal_sequences_keep_existing_observation_order_without_lexical_ids() {
         crate::client::shell::agent_sidebar::ordered_agent_pane_ids(
             &snapshot,
             crate::config::AgentPanelSortConfig::Priority,
-            Some(&ranks)
+            Some(&ranks),
+            None
         ),
         ["ws_1:p2", "ws_1:p9"]
     );
@@ -429,6 +431,7 @@ fn grouped_layout_ignores_server_priority_but_explicit_views_keep_their_order() 
         crate::client::shell::agent_sidebar::ordered_agent_pane_ids(
             &snapshot,
             crate::config::AgentPanelSortConfig::Spaces,
+            None,
             None
         ),
         ["ws_1:p9", "ws_1:p2"]
@@ -438,6 +441,7 @@ fn grouped_layout_ignores_server_priority_but_explicit_views_keep_their_order() 
         crate::client::shell::agent_sidebar::ordered_agent_pane_ids(
             &snapshot,
             crate::config::AgentPanelSortConfig::Spaces,
+            None,
             None
         ),
         ["ws_1:p2", "ws_1:p9"]

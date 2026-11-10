@@ -304,6 +304,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
                 tab_id: "tab_1".into(),
                 workspace_id: "ws_1".into(),
                 move_source: None,
+                done_target: None,
             },
             x: 35,
             y: 8,

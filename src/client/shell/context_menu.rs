@@ -101,6 +101,20 @@ impl ClientContextMenuOverlay {
         ) {
             items.push(item("Move to space...", Action::MoveToSpace));
         }
+        if let ClientContextMenuTarget::Tab {
+            done_target: Some(target),
+            ..
+        } = &self.target
+        {
+            items.push(item(
+                if target.done {
+                    "Mark active"
+                } else {
+                    "Mark done"
+                },
+                Action::SetTabDone(!target.done),
+            ));
+        }
         items
     }
 }
@@ -247,6 +261,7 @@ impl ClientShellState {
                 tab_id: tab_id.clone(),
                 workspace_id: tab.workspace_id.clone(),
                 move_source: self.tab_move_source(&tab_id),
+                done_target: self.done_tab_target(&tab_id),
             },
             x,
             y,
@@ -342,8 +357,13 @@ impl ClientShellState {
                 tab_id,
                 workspace_id,
                 move_source,
+                done_target,
             } => {
-                if action == ClientContextMenuAction::MoveToSpace {
+                if let ClientContextMenuAction::SetTabDone(done) = action {
+                    if let Some(target) = done_target {
+                        self.set_tab_done(target, done, outcome);
+                    }
+                } else if action == ClientContextMenuAction::MoveToSpace {
                     if let Some(source) = move_source {
                         self.open_tab_move_picker(source, outcome);
                     }

@@ -9,6 +9,7 @@ pub(crate) fn render_tab_bar(
     area: Rect,
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
+    done_tabs: Option<&HashSet<String>>,
     tab_scroll: &mut usize,
     reveal_focused_tab: &mut bool,
     hits: &mut ShellHitMap,
@@ -19,6 +20,7 @@ pub(crate) fn render_tab_bar(
             area,
             snapshot,
             config,
+            done_tabs,
             tab_scroll,
             reveal_focused_tab,
             hits,
@@ -32,7 +34,15 @@ pub(crate) fn render_tab_bar(
         .iter()
         .filter(|tab| Some(tab.workspace_id.as_str()) == snapshot.focused_workspace_id.as_deref())
         .collect::<Vec<_>>();
-    let desired_widths = tabs.iter().map(|tab| tab_width(tab)).collect::<Vec<_>>();
+    let desired_widths = tabs
+        .iter()
+        .map(|tab| {
+            tab_width(
+                tab,
+                done_tabs.is_some_and(|tabs| tabs.contains(&tab.tab_id)),
+            )
+        })
+        .collect::<Vec<_>>();
     let content = tab_bar_content_area(snapshot, area);
     let mouse_chrome = config.mouse_capture;
     let new_tab_width = if mouse_chrome { NEW_TAB_WIDTH } else { 0 };
@@ -97,7 +107,10 @@ pub(crate) fn render_tab_bar(
     let mut first_visible = None;
     let mut last_visible = None;
     for (index, tab) in tabs.iter().enumerate().skip(*tab_scroll) {
-        let name = tab_label(tab);
+        let name = tab_label(
+            tab,
+            done_tabs.is_some_and(|tabs| tabs.contains(&tab.tab_id)),
+        );
         let desired = desired_widths[index];
         let remaining = tab_right.saturating_sub(x);
         let width = desired.min(remaining);
@@ -412,24 +425,41 @@ fn max_tab_scroll(widths: &[u16], available: u16) -> usize {
     start
 }
 
-pub(super) fn tab_width(tab: &ClientShellTab) -> u16 {
+pub(super) fn tab_width(tab: &ClientShellTab, done: bool) -> u16 {
     display_width(&tab.label)
         .saturating_add(if tab.zoomed { 2 } else { 0 })
+        .saturating_add(if done { 2 } else { 0 })
         .saturating_add(4)
         .max(MIN_TAB_WIDTH)
 }
 
-pub(super) fn tab_label(tab: &ClientShellTab) -> String {
-    if tab.zoomed {
+pub(super) fn tab_label(tab: &ClientShellTab, done: bool) -> String {
+    let mut label = if tab.zoomed {
         format!("{} Z", tab.label)
     } else {
         tab.label.clone()
+    };
+    if done {
+        label.push_str(" ✓");
     }
+    label
 }
 
 #[cfg(test)]
 mod tests {
-    use super::max_tab_scroll;
+    use super::{max_tab_scroll, tab_label, tab_width};
+
+    #[test]
+    fn done_tab_label_and_width_agree_with_unicode_and_zoom() {
+        let mut tab = crate::client::shell::tests::snapshot().tabs.remove(0);
+        tab.label = "日本語 reviewed".into();
+        tab.zoomed = true;
+        assert_eq!(tab_label(&tab, true), "日本語 reviewed Z ✓");
+        assert_eq!(
+            tab_width(&tab, true),
+            super::display_width(&tab_label(&tab, true)) + 4
+        );
+    }
 
     #[test]
     fn trailing_scroll_limit_accounts_for_full_widths_and_separators() {

@@ -197,7 +197,7 @@ fn move_requires_positive_advertisement_and_a_live_generation() {
                 .iter()
                 .map(|item| item.label)
                 .collect::<Vec<_>>(),
-            ["New tab", "Rename", "Close"]
+            ["New tab", "Rename", "Close", "Mark done"]
         );
         assert!(state.tab_move_source(SOURCE).is_none());
     }

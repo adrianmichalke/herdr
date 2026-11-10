@@ -160,6 +160,7 @@ impl ClientShellConfig {
                 .switch_ascii_input_source_in_prefix,
             local_config_path: crate::config::config_path(),
             preferences_path: None,
+            done_tabs_local_scope: "local".into(),
             preferences: preferences::ClientChromePreferences::default(),
             startup_config_diagnostic: None,
             startup_onboarding: false,
@@ -197,7 +198,16 @@ impl ClientShellConfig {
         }
     }
 
-    pub(crate) fn with_local_endpoint(self, socket_path: &std::path::Path) -> Self {
+    pub(crate) fn with_local_endpoint(mut self, socket_path: &std::path::Path) -> Self {
+        let session = crate::session::parse_target_name(&self.initial_session_name)
+            .ok()
+            .flatten();
+        self.done_tabs_local_scope =
+            if socket_path == crate::session::client_socket_path_for(session.as_deref()) {
+                "local".into()
+            } else {
+                format!("local-socket:{}", socket_path.display())
+            };
         self.with_preferences_path(preferences::path_for_local_endpoint(socket_path))
     }
 
