@@ -919,6 +919,7 @@ impl ClientShellState {
                         .iter()
                         .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
                         .map(|endpoint| &endpoint.agent_recency),
+                    self.active_done_tabs(),
                 );
                 Some(Method::PaneFocus(PaneTarget {
                     pane_id: agents.get(index)?.clone(),
@@ -932,6 +933,7 @@ impl ClientShellState {
                         .iter()
                         .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
                         .map(|endpoint| &endpoint.agent_recency),
+                    self.active_done_tabs(),
                 );
                 if agents.is_empty() {
                     return None;

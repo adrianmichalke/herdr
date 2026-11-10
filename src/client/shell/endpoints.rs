@@ -19,6 +19,7 @@ pub(crate) struct ClientShellEndpoint {
     /// Connection generation that produced `snapshot`. `None` is reserved for local tests.
     pub(crate) snapshot_generation: Option<u64>,
     pub(crate) agent_recency: HashMap<String, u64>,
+    pub(crate) done_tabs: HashSet<String>,
     pub(super) agent_presentation: super::endpoint_agent_state::EndpointAgentPresentation,
     pub(crate) agent_view_projection: Option<ClientEndpointAgentViewProjection>,
     pending_agent_view_projection: Option<ClientEndpointAgentViewProjection>,
@@ -99,6 +100,7 @@ impl ClientShellState {
         candidate.session_hidden = true;
         candidate.status = ClientEndpointStatus::Connecting;
         candidate.agent_recency = self.agent_recency.ranks(&candidate.recency_id());
+        candidate.done_tabs = self.done_tab_preferences.load(&candidate);
         self.endpoints.push(candidate);
         true
     }
@@ -147,7 +149,12 @@ impl ClientShellState {
             .iter()
             .find(|endpoint| endpoint.endpoint_id.is_local() && !endpoint.session_hidden)
             .cloned()
-            .unwrap_or_else(local_endpoint);
+            .unwrap_or_else(|| {
+                let mut endpoint = local_endpoint();
+                endpoint.session_name = self.config.initial_session_name.clone();
+                endpoint.done_tabs = self.done_tab_preferences.load(&endpoint);
+                endpoint
+            });
         next.push(local);
         for profile in profiles {
             let machine = ClientEndpointId::Ssh(profile.id.clone());
@@ -174,7 +181,7 @@ impl ClientShellState {
                 machine: Box::new(endpoint_id.machine_id()),
                 name: session_name.clone(),
             };
-            next.push(ClientShellEndpoint {
+            let mut endpoint = ClientShellEndpoint {
                 endpoint_id: endpoint_id.clone(),
                 label: profile.label.clone(),
                 session_name,
@@ -190,6 +197,9 @@ impl ClientShellState {
                 snapshot: previous.and_then(|endpoint| endpoint.snapshot.clone()),
                 snapshot_generation: previous.and_then(|endpoint| endpoint.snapshot_generation),
                 agent_recency: self.agent_recency.ranks(&recency_id),
+                done_tabs: previous
+                    .map(|endpoint| endpoint.done_tabs.clone())
+                    .unwrap_or_default(),
                 agent_presentation: previous
                     .map(|endpoint| endpoint.agent_presentation.clone())
                     .unwrap_or_default(),
@@ -202,7 +212,11 @@ impl ClientShellState {
                 agent_activity_supported: previous
                     .is_some_and(|endpoint| endpoint.agent_activity_supported),
                 methods: previous.and_then(|endpoint| endpoint.methods.clone()),
-            });
+            };
+            if previous.is_none() {
+                endpoint.done_tabs = self.done_tab_preferences.load(&endpoint);
+            }
+            next.push(endpoint);
         }
 
         if !next
@@ -758,6 +772,7 @@ impl ClientShellState {
         self.agent_recency
             .observe(&recency_id, &snapshot, activity, std::time::Instant::now());
         let recency = self.agent_recency.ranks(&recency_id);
+        self.prune_done_tabs(index, &snapshot);
         let endpoint = &mut self.endpoints[index];
         endpoint.agent_recency = recency;
         endpoint.snapshot_generation = generation;
@@ -879,6 +894,7 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
         snapshot: None,
         snapshot_generation: None,
         agent_recency: HashMap::new(),
+        done_tabs: HashSet::new(),
         agent_presentation: Default::default(),
         agent_view_projection: None,
         pending_agent_view_projection: None,

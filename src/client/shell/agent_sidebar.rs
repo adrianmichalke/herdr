@@ -21,21 +21,26 @@ pub(super) fn ordered_agent_pane_ids(
     snapshot: &ClientShellSnapshot,
     sort: crate::config::AgentPanelSortConfig,
     recency: Option<&HashMap<String, u64>>,
+    done_tabs: Option<&HashSet<String>>,
 ) -> Vec<String> {
     if snapshot.agent_view_label.is_some() {
         return snapshot
             .agent_order
             .iter()
             .filter(|pane_id| {
-                snapshot
-                    .agents
-                    .iter()
-                    .any(|agent| agent.pane_id == pane_id.as_str())
+                snapshot.agents.iter().any(|agent| {
+                    agent.pane_id == pane_id.as_str()
+                        && !done_tabs.is_some_and(|tabs| tabs.contains(&agent.tab_id))
+                })
             })
             .cloned()
             .collect();
     }
-    let mut agents = snapshot.agents.iter().collect::<Vec<_>>();
+    let mut agents = snapshot
+        .agents
+        .iter()
+        .filter(|agent| !done_tabs.is_some_and(|tabs| tabs.contains(&agent.tab_id)))
+        .collect::<Vec<_>>();
     if sort == crate::config::AgentPanelSortConfig::Priority {
         agents.sort_by_key(|agent| {
             (
@@ -58,6 +63,7 @@ pub(super) fn render_agent_panel(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     recency: Option<&HashMap<String, u64>>,
+    done_tabs: Option<&HashSet<String>>,
     agent_scroll: &mut usize,
     hits: &mut ShellHitMap,
 ) {
@@ -71,7 +77,7 @@ pub(super) fn render_agent_panel(
         return;
     }
 
-    let rows = agent_rows(snapshot, config, None, recency);
+    let rows = agent_rows(snapshot, config, None, recency, done_tabs);
     render_agent_list(
         buffer,
         area,
@@ -243,8 +249,9 @@ pub(super) fn agent_rows(
     config: &ClientShellConfig,
     machine: Option<&str>,
     recency: Option<&HashMap<String, u64>>,
+    done_tabs: Option<&HashSet<String>>,
 ) -> Vec<AgentRow> {
-    ordered_agent_pane_ids(snapshot, config.agent_panel_sort, recency)
+    ordered_agent_pane_ids(snapshot, config.agent_panel_sort, recency, done_tabs)
         .into_iter()
         .filter_map(|pane_id| agent_row(snapshot, &pane_id, config, machine))
         .collect()

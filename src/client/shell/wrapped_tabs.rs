@@ -42,6 +42,7 @@ pub(crate) fn wrapped_tab_bar_height(
     config: &ClientShellConfig,
     width: u16,
     max_height: u16,
+    done_tabs: Option<&HashSet<String>>,
 ) -> u16 {
     let content = tab_bar_content_area(snapshot, Rect::new(0, 0, width, 1));
     let width = content.width.saturating_sub(if config.mouse_capture {
@@ -56,7 +57,12 @@ pub(crate) fn wrapped_tab_bar_height(
             .filter(|tab| {
                 Some(tab.workspace_id.as_str()) == snapshot.focused_workspace_id.as_deref()
             })
-            .map(tab_width),
+            .map(|tab| {
+                tab_width(
+                    tab,
+                    done_tabs.is_some_and(|tabs| tabs.contains(&tab.tab_id)),
+                )
+            }),
         width,
         |_| {},
     );
@@ -68,6 +74,7 @@ pub(super) fn render_wrapped_tab_bar(
     area: Rect,
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
+    done_tabs: Option<&HashSet<String>>,
     tab_scroll: &mut usize,
     reveal_focused_tab: &mut bool,
     hits: &mut ShellHitMap,
@@ -90,9 +97,16 @@ pub(super) fn render_wrapped_tab_bar(
     };
     let mut placements = Vec::with_capacity(tabs.len());
     let mut width = content.width.saturating_sub(new_width);
-    let mut rows = pack_tabs(tabs.iter().map(|tab| tab_width(tab)), width, |placement| {
-        placements.push(placement)
-    });
+    let mut rows = pack_tabs(
+        tabs.iter().map(|tab| {
+            tab_width(
+                tab,
+                done_tabs.is_some_and(|tabs| tabs.contains(&tab.tab_id)),
+            )
+        }),
+        width,
+        |placement| placements.push(placement),
+    );
     let controls = rows > usize::from(area.height)
         && config.mouse_capture
         && content.width >= MIN_TAB_STRIP_WIDTH;
@@ -100,9 +114,16 @@ pub(super) fn render_wrapped_tab_bar(
     if controls {
         width = width.saturating_sub(TAB_SCROLL_BUTTON_WIDTH.saturating_mul(2));
         placements.clear();
-        rows = pack_tabs(tabs.iter().map(|tab| tab_width(tab)), width, |placement| {
-            placements.push(placement)
-        });
+        rows = pack_tabs(
+            tabs.iter().map(|tab| {
+                tab_width(
+                    tab,
+                    done_tabs.is_some_and(|tabs| tabs.contains(&tab.tab_id)),
+                )
+            }),
+            width,
+            |placement| placements.push(placement),
+        );
     }
     let body = Rect::new(content.x.saturating_add(left), area.y, width, area.height);
     let max_scroll = rows.saturating_sub(usize::from(area.height));
@@ -133,7 +154,10 @@ pub(super) fn render_wrapped_tab_bar(
             continue;
         };
         let tab = tabs[index];
-        let name = tab_label(tab);
+        let name = tab_label(
+            tab,
+            done_tabs.is_some_and(|tabs| tabs.contains(&tab.tab_id)),
+        );
         let style = if tab.focused {
             let style = Style::default()
                 .fg(panel_contrast_fg(palette))

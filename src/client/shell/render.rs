@@ -323,6 +323,11 @@ pub(super) fn render_shell(
                             && endpoint.endpoint_id == *state.active_endpoint_id
                     })
                     .map(|endpoint| &endpoint.agent_recency),
+                state
+                    .endpoints
+                    .iter()
+                    .find(|endpoint| endpoint.endpoint_id == *state.active_endpoint_id)
+                    .map(|endpoint| &endpoint.done_tabs),
                 state.active_endpoint_id,
                 state
                     .selected_workspace_id
@@ -367,6 +372,11 @@ pub(super) fn render_shell(
             tab_bar,
             snapshot,
             config,
+            state
+                .endpoints
+                .iter()
+                .find(|endpoint| endpoint.endpoint_id == *state.active_endpoint_id)
+                .map(|endpoint| &endpoint.done_tabs),
             state.tab_scroll,
             state.reveal_focused_tab,
             &mut hits,

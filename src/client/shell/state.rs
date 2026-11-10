@@ -50,6 +50,7 @@ pub(crate) struct ClientShellConfig {
     pub(super) switch_ascii_input_source_in_prefix: bool,
     pub(super) local_config_path: std::path::PathBuf,
     pub(super) preferences_path: Option<std::path::PathBuf>,
+    pub(super) done_tabs_local_scope: String,
     pub(super) preferences: preferences::ClientChromePreferences,
     pub(super) startup_config_diagnostic: Option<String>,
     pub(super) startup_onboarding: bool,
@@ -565,6 +566,7 @@ pub(super) enum ClientContextMenuAction {
     MoveToSession,
     MoveToSpace,
     MarkUnseen,
+    SetTabDone(bool),
     Rename,
     Close,
     NewWorktree,
@@ -606,6 +608,7 @@ pub(super) enum ClientContextMenuTarget {
         tab_id: String,
         workspace_id: String,
         move_source: Option<super::tab_move::TabMoveSource>,
+        done_target: Option<super::done_tabs::DoneTabTarget>,
     },
     Pane {
         pane_id: String,
@@ -980,6 +983,7 @@ pub(crate) struct ClientShellState {
     pub(super) hits: ShellHitMap,
     pub(super) endpoints: Vec<ClientShellEndpoint>,
     pub(super) agent_recency: super::agent_recency::AgentRecencyCache,
+    pub(super) done_tab_preferences: super::done_tabs::DoneTabPreferences,
     pub(super) active_endpoint_id: ClientEndpointId,
     pub(super) collapsed_endpoints: HashSet<ClientEndpointId>,
     pub(super) mode: ClientShellMode,
@@ -1090,6 +1094,8 @@ impl ClientShellState {
             std::time::Instant::now(),
         );
         local.agent_recency = agent_recency.ranks(&local.recency_id());
+        let done_tab_preferences = super::done_tabs::DoneTabPreferences::new(&config);
+        local.done_tabs = done_tab_preferences.load(&local);
         let preferences = config.preferences.clone();
         let local_config_diagnostic = config.startup_config_diagnostic.take();
         let overlay = config
@@ -1170,6 +1176,7 @@ impl ClientShellState {
             hits: ShellHitMap::default(),
             endpoints: vec![local],
             agent_recency,
+            done_tab_preferences,
             active_endpoint_id: ClientEndpointId::Local,
             collapsed_endpoints: HashSet::new(),
             mode: ClientShellMode::Terminal,
@@ -1350,8 +1357,13 @@ impl ClientShellState {
                     .tab_bar_max_rows
                     .max(1)
                     .min(rows.saturating_sub(crate::pane::MIN_PANE_ROWS).max(1));
-                let height =
-                    render::wrapped_tab_bar_height(snapshot, &self.config, width, max_height);
+                let height = render::wrapped_tab_bar_height(
+                    snapshot,
+                    &self.config,
+                    width,
+                    max_height,
+                    self.active_done_tabs(),
+                );
                 let extra = height.saturating_sub(layout.tab_bar.height);
                 layout.tab_bar.height = height;
                 layout.pane_surface.height = layout.pane_surface.height.saturating_sub(extra);

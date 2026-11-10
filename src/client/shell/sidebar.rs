@@ -50,6 +50,7 @@ pub(crate) fn render_collapsed_sidebar(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     recency: Option<&HashMap<String, u64>>,
+    done_tabs: Option<&HashSet<String>>,
     active_endpoint_id: &ClientEndpointId,
     selected_workspace_id: Option<&str>,
     hits: &mut ShellHitMap,
@@ -130,7 +131,7 @@ pub(crate) fn render_collapsed_sidebar(
         detail_area.height.saturating_sub(1),
     );
     for (index, pane_id) in
-        super::ordered_agent_pane_ids(snapshot, config.agent_panel_sort, recency)
+        super::ordered_agent_pane_ids(snapshot, config.agent_panel_sort, recency, done_tabs)
             .into_iter()
             .take(detail_content.height as usize)
             .enumerate()
@@ -445,6 +446,11 @@ pub(crate) fn render_sidebar(
                 !endpoint.session_hidden && endpoint.endpoint_id == *state.active_endpoint_id
             })
             .map(|endpoint| &endpoint.agent_recency),
+        state
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == *state.active_endpoint_id)
+            .map(|endpoint| &endpoint.done_tabs),
         state.agent_scroll,
         hits,
     );
